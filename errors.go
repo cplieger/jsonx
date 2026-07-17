@@ -33,7 +33,7 @@ const (
 	// ReasonFractional rejects non-integral values.
 	ReasonFractional Reason = "fractional value"
 	// ReasonOutOfRange rejects values outside the policy's range,
-	// including int64/float64 overflows.
+	// including int64 overflows.
 	ReasonOutOfRange Reason = "out of range"
 )
 

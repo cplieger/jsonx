@@ -104,7 +104,7 @@ The two per-caller wrappers in subflux compose as pure policies too (pinned by t
 `Classify` produces `Facts`; `ParseInt64` applies the policy's gates in a fixed order:
 
 1. Non-numeric shapes dispatch on `Shape`: `Empty`, `Null`, `EmptyString`, `MalformedString`, `NonNumericString`, `Other` → the matching `Disposition` (`Zero` or `Reject`).
-2. Numeric values then pass `PaddedString` → `FloatForm` → `Fractional` → range (`MinValue`/`MaxValue`, including int64/float64 overflow → `OutOfRange`).
+2. Numeric values then pass `PaddedString` → `FloatForm` → `Fractional` → range (`MinValue`/`MaxValue`, including int64 overflow → `OutOfRange`).
 
 `Disposition` is fail-closed: its zero value is `Reject`, and `Accept` is meaningful only where a usable integer exists (`PaddedString`, `FloatForm`) — on any other gate it is treated as `Reject`, never as silent acceptance. There is deliberately no truncation path: `Fractional` can only zero or reject. A zero-value `Policy` rejects everything except the literal 0.
 
@@ -117,7 +117,7 @@ The origin decoders leaned on raw `strconv` parsers, whose grammar is looser tha
 - Quoted hex floats (`"0x1p2"`), `"Inf"`/`"NaN"` words, and digit-separator underscores (`"1_000"`) — accepted by `strconv.ParseFloat`, so silently accepted by the tolerant origin — now classify as non-numeric strings.
 - Only ASCII JSON whitespace counts as padding; a Unicode-space-padded token stays garbage.
 - Integer literals parse via `strconv.ParseInt` across the whole int64 range — never through float64, whose rounding corrupts ids above 2^53 (the tolerant origin funneled everything through float64; harmless under its MaxInt32 bound, wrong for wider bounds).
-- The float-form path converts to int64 with an exact 2^63 boundary check, closing the classic `float64(MaxInt64)` rounding trap.
+- Float-form literals (`"9.0"`, `1e3`) are classified on their decimal digits, never converted through float64 either: integrality, range, and the exact value are decided from significand and exponent. `9007199254740993.0` (2^53+1, the first integer binary64 cannot represent) decodes exactly instead of rounding to 2^53, a full underflow (`1e-999`) classifies as fractional instead of collapsing to an integral zero, and the int64 boundary is exact — `"9223372036854775807.0"` is MaxInt64, one more overflows. Adversarially long exponents saturate, so classification work stays bounded by input length.
 
 Quoted-number reality is still honored: leading zeros (`"007"`) and a leading `+` (`"+5"`) parse in string form (all three origins accepted them via `Atoi`/`ParseFloat`), while bare tokens must be exact JSON grammar — as every origin already required.
 

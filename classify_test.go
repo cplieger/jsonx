@@ -57,8 +57,27 @@ func TestClassify(t *testing.T) {
 		{"bare negative fractional", `-1.5`, jsonx.Facts{Shape: jsonx.Number, FloatForm: true, Fractional: true, Negative: true}},
 		{"bare negative float zero", `-0.0`, jsonx.Facts{Shape: jsonx.Number, Value: 0, FloatForm: true}},
 		{"bare float overflow", `1e999`, jsonx.Facts{Shape: jsonx.Number, FloatForm: true, Overflow: true}},
-		{"bare float underflow to zero", `1e-999`, jsonx.Facts{Shape: jsonx.Number, Value: 0, FloatForm: true}},
 		{"bare subnormal", `1e-310`, jsonx.Facts{Shape: jsonx.Number, FloatForm: true, Fractional: true}},
+
+		// Exact-decimal classification: decided on digits, never through
+		// float64. A full underflow is a nonzero value below one -
+		// fractional - not the integral zero float64 collapses it to.
+		{"bare full underflow", `1e-999`, jsonx.Facts{Shape: jsonx.Number, FloatForm: true, Fractional: true}},
+		{"bare negative full underflow", `-1e-999`, jsonx.Facts{Shape: jsonx.Number, FloatForm: true, Fractional: true, Negative: true}},
+		// 2^53+1 is the first integer binary64 cannot represent; the
+		// digits path decodes it exactly instead of rounding to 2^53.
+		{"bare float above 2^53", `9007199254740993.0`, jsonx.Facts{Shape: jsonx.Number, Value: 9007199254740993, FloatForm: true}},
+		{"quoted float above 2^53", `"9007199254740993.0"`, jsonx.Facts{Shape: jsonx.NumericString, Value: 9007199254740993, FloatForm: true}},
+		{"bare fractional above 2^53", `9007199254740993.5`, jsonx.Facts{Shape: jsonx.Number, FloatForm: true, Fractional: true}},
+		// A fractional offset far below float64's epsilon still counts.
+		{"bare sub-epsilon fraction", `1.0000000000000000001`, jsonx.Facts{Shape: jsonx.Number, FloatForm: true, Fractional: true}},
+		// Exponent normalization: exact value assembly and cancellation.
+		{"bare max int64 via exponent", `9.223372036854775807e18`, jsonx.Facts{Shape: jsonx.Number, Value: math.MaxInt64, FloatForm: true}},
+		{"bare exponent just past int64", `1e19`, jsonx.Facts{Shape: jsonx.Number, FloatForm: true, Overflow: true}},
+		// Adversarially long exponents saturate; work stays bounded.
+		{"bare adversarial exponent", `1e999999999999999999999`, jsonx.Facts{Shape: jsonx.Number, FloatForm: true, Overflow: true}},
+		{"bare adversarial negative exponent", `1e-999999999999999999999`, jsonx.Facts{Shape: jsonx.Number, FloatForm: true, Fractional: true}},
+		{"bare zero with huge exponent", `0e999999999999999999999`, jsonx.Facts{Shape: jsonx.Number, Value: 0, FloatForm: true}},
 		{"bare max int64", `9223372036854775807`, jsonx.Facts{Shape: jsonx.Number, Value: math.MaxInt64}},
 		{"bare min int64", `-9223372036854775808`, jsonx.Facts{Shape: jsonx.Number, Value: math.MinInt64, Negative: true}},
 		{"bare int64 overflow", `9223372036854775808`, jsonx.Facts{Shape: jsonx.Number, Overflow: true}},
@@ -80,10 +99,13 @@ func TestClassify(t *testing.T) {
 		{"quoted int32 overflow value", `"2147483648"`, jsonx.Facts{Shape: jsonx.NumericString, Value: 2147483648}},
 		{"quoted int64 overflow", `"9223372036854775808"`, jsonx.Facts{Shape: jsonx.NumericString, Overflow: true}},
 		{"quoted float at 2^63", `"9223372036854775808.0"`, jsonx.Facts{Shape: jsonx.NumericString, FloatForm: true, Overflow: true}},
-		// float64 rounds MaxInt64 up to 2^63, so the float FORM of
-		// MaxInt64 must classify as overflow rather than wrap.
-		{"quoted float at max int64", `"9223372036854775807.0"`, jsonx.Facts{Shape: jsonx.NumericString, FloatForm: true, Overflow: true}},
+		// The digits path is exact at the int64 boundary: float64 would
+		// round MaxInt64 up to 2^63, but the float FORM of MaxInt64 is a
+		// representable value and decodes as itself.
+		{"quoted float at max int64", `"9223372036854775807.0"`, jsonx.Facts{Shape: jsonx.NumericString, Value: math.MaxInt64, FloatForm: true}},
 		{"quoted float at min int64", `"-9223372036854775808.0"`, jsonx.Facts{Shape: jsonx.NumericString, Value: math.MinInt64, FloatForm: true, Negative: true}},
+		{"quoted float below min int64", `"-9223372036854775809.0"`, jsonx.Facts{Shape: jsonx.NumericString, FloatForm: true, Overflow: true, Negative: true}},
+		{"quoted leading-zero float", `"007.5e2"`, jsonx.Facts{Shape: jsonx.NumericString, Value: 750, FloatForm: true}},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
