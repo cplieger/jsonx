@@ -39,7 +39,7 @@ type Policy struct {
 	// OutOfRange.
 	MinValue int64
 	// MaxValue is the largest accepted value; anything above (including
-	// any int64/float64 overflow) is OutOfRange.
+	// any int64 overflow) is OutOfRange.
 	MaxValue int64
 	// Null handles the JSON null literal (Zero or Reject).
 	Null Disposition
@@ -69,7 +69,7 @@ type Policy struct {
 	// There is no Accept: this package never truncates.
 	Fractional Disposition
 	// OutOfRange handles values outside [MinValue, MaxValue], including
-	// int64/float64 overflows (Zero or Reject).
+	// int64 overflows (Zero or Reject).
 	OutOfRange Disposition
 }
 

@@ -1,8 +1,12 @@
 package jsonx_test
 
 import (
+	"bytes"
+	"encoding/json"
 	"math"
+	"math/big"
 	"strconv"
+	"strings"
 	"testing"
 
 	"github.com/cplieger/jsonx"
@@ -27,6 +31,10 @@ var seedCorpus = []string{
 	`-9223372036854775808`, `9223372036854775808`, `" 12 "`, `"007"`,
 	`"+5"`, `"0x1p2"`, `"NaN"`, `"Inf"`, `"1_000"`, `"5."`, `".5"`,
 	`"1e-999"`, `"1e999"`, `007`, `+5`, `5 x`, `!!!`,
+	`9007199254740993.0`, `"9007199254740993.0"`, `9007199254740993.5`,
+	`9.223372036854775807e18`, `1.0000000000000000001`, `-1e-999`,
+	`"9223372036854775807.0"`, `1e19`, `0e999999999999999999999`,
+	`1e999999999999999999999`, `"007.5e2"`,
 }
 
 // checkFactsConsistency asserts the internal coherence of a
@@ -51,6 +59,82 @@ func checkFactsConsistency(t reporter, data []byte, f jsonx.Facts) {
 	}
 }
 
+// checkFloatFormExactness cross-checks a float-form classification
+// against math/big.Rat, which parses decimal literals exactly: the
+// integral/fractional/overflow decision, the exact Value, and the sign
+// must all agree with the rational oracle. FloatForm AND integral
+// implies Value is the exact decimal value. Inputs whose exponent body
+// runs past four digits are skipped: the oracle materializes 10^|exp|,
+// which is the unbounded work the production classifier avoids by
+// saturating.
+func checkFloatFormExactness(t reporter, data []byte, f jsonx.Facts) {
+	t.Helper()
+	if !f.FloatForm {
+		return
+	}
+	lit, ok := numericLiteral(data, f)
+	if !ok || longExponent(lit) {
+		return
+	}
+	r, ok := new(big.Rat).SetString(lit)
+	if !ok {
+		t.Errorf("Classify(%q): float-form literal %q rejected by the big.Rat oracle", data, lit)
+		return
+	}
+	switch {
+	case f.Fractional:
+		if r.IsInt() {
+			t.Errorf("Classify(%q): Fractional, but %q is the integer %v", data, lit, r.Num())
+		}
+	case f.Overflow:
+		if !r.IsInt() {
+			t.Errorf("Classify(%q): Overflow, but %q is fractional", data, lit)
+		} else if r.Num().IsInt64() {
+			t.Errorf("Classify(%q): Overflow, but %q = %v fits int64", data, lit, r.Num())
+		}
+	default:
+		if !r.IsInt() {
+			t.Errorf("Classify(%q): claimed integral, but %q is fractional", data, lit)
+		} else if !r.Num().IsInt64() {
+			t.Errorf("Classify(%q): Value=%d, but %q overflows int64", data, f.Value, lit)
+		} else if got := r.Num().Int64(); got != f.Value {
+			t.Errorf("Classify(%q): Value=%d, oracle says %d", data, f.Value, got)
+		}
+	}
+	if (r.Sign() < 0) != f.Negative {
+		t.Errorf("Classify(%q): Negative=%v, oracle sign %d", data, f.Negative, r.Sign())
+	}
+}
+
+// numericLiteral recovers the decimal literal Classify judged: the
+// trimmed raw token for a bare number, the trimmed string content for a
+// quoted one.
+func numericLiteral(data []byte, f jsonx.Facts) (string, bool) {
+	trimmed := bytes.Trim(data, " \t\r\n")
+	if f.Shape == jsonx.Number {
+		return string(trimmed), true
+	}
+	var s string
+	if json.Unmarshal(trimmed, &s) != nil {
+		return "", false
+	}
+	return strings.Trim(s, " \t\r\n"), true
+}
+
+// longExponent reports an exponent body longer than four digits (see
+// checkFloatFormExactness).
+func longExponent(lit string) bool {
+	i := strings.IndexAny(lit, "eE")
+	if i < 0 {
+		return false
+	}
+	body := lit[i+1:]
+	if len(body) > 0 && (body[0] == '+' || body[0] == '-') {
+		body = body[1:]
+	}
+	return len(body) > 4
+}
+
 // checkCrossPolicyInvariants asserts the relationships between the three
 // shipped policies, for any input:
 //
@@ -67,6 +151,7 @@ func checkCrossPolicyInvariants(t reporter, data []byte) {
 	t.Helper()
 	facts := jsonx.Classify(data)
 	checkFactsConsistency(t, data, facts)
+	checkFloatFormExactness(t, data, facts)
 
 	tv, terr := jsonx.ParseInt64(data, jsonx.TolerantZero())
 	sv, serr := jsonx.ParseInt64(data, jsonx.Strict())

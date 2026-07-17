@@ -3,7 +3,6 @@ package jsonx
 import (
 	"bytes"
 	"encoding/json"
-	"math"
 	"strconv"
 	"strings"
 )
@@ -64,15 +63,17 @@ type Facts struct {
 	// value.
 	FloatForm bool
 	// Fractional reports that the numeric value is not integral (1.5,
-	// "12.5", a subnormal underflow). Value stays 0: this package never
-	// truncates.
+	// "12.5", a full underflow like 1e-999). The decision is made on
+	// the decimal digits, not a float64 approximation, so values a
+	// float64 would round to an integer still classify as fractional.
+	// Value stays 0: this package never truncates.
 	Fractional bool
 	// Negative reports a negative value. For Overflow tokens, whose
 	// exact value is unknown, it reflects the literal's sign; for parsed
 	// values it is Value < 0 (so "-0" is not negative).
 	Negative bool
-	// Overflow reports a numeric magnitude that does not fit int64 (or,
-	// for float forms, float64). Value stays 0.
+	// Overflow reports a numeric magnitude that does not fit int64.
+	// Value stays 0.
 	Overflow bool
 	// Padded reports that the string content carried surrounding ASCII
 	// whitespace (" 12 "). Only NumericString and NonNumericString
@@ -143,9 +144,10 @@ func classifyString(data []byte) Facts {
 }
 
 // classifyNumber parses a grammar-validated numeric literal into Facts,
-// routing float forms through the exact-conversion float path and integer
-// forms through strconv.ParseInt (exact across the whole int64 range - no
-// float64 round trip that could corrupt large ids).
+// routing float forms through the exact decimal classifier and integer
+// forms through strconv.ParseInt. Both paths are exact across the whole
+// int64 range - no float64 round trip anywhere that could corrupt large
+// ids.
 func classifyNumber(lit string, shape Shape, padded bool) Facts {
 	facts := Facts{Shape: shape, Padded: padded}
 	if strings.ContainsAny(lit, ".eE") {
@@ -165,39 +167,121 @@ func classifyNumber(lit string, shape Shape, padded bool) Facts {
 	return facts
 }
 
-// int64 bounds expressed in float64. 2^63 is exactly representable, so
-// "n < minInt64Float || n >= maxInt64Float" is the precise overflow test:
-// it rejects 2^63 itself (one past math.MaxInt64, yet equal to
-// float64(math.MaxInt64) after rounding - the classic conversion trap)
-// while accepting -2^63 exactly.
-const (
-	maxInt64Float = float64(1 << 63)
-	minInt64Float = -maxInt64Float
-)
+// maxInt64Digits is the decimal digit count of math.MaxInt64
+// (9223372036854775807). An integer with more significant digits
+// overflows int64 outright; at exactly this count strconv.ParseInt
+// decides the boundary precisely.
+const maxInt64Digits = 19
 
-// classifyFloatValue fills facts for a float-form literal: fractional
-// values and overflows carry no Value; integral in-range values convert
-// exactly.
+// classifyFloatValue fills facts for a grammar-validated float-form
+// literal. The decision is made on the decimal digits themselves - the
+// literal is never converted through float64, whose 53-bit significand
+// silently rounds integers above 2^53 (9007199254740993.0 would decode
+// as ...992) and collapses full underflows ("1e-999") to an integral
+// zero. Work is bounded by the input length: adversarially long
+// exponents saturate, and a value is materialized for parsing only once
+// known to fit maxInt64Digits.
 func classifyFloatValue(lit string, facts *Facts) {
-	facts.Negative = lit[0] == '-'
-	n, err := strconv.ParseFloat(lit, 64)
-	if err != nil {
-		// On grammar-valid decimal input ParseFloat fails only by
-		// overflowing to +/-Inf ("1e999"); an underflow ("1e-999")
-		// returns 0 with no error and flows through the integral path.
-		facts.Overflow = true
+	sig, exp, neg := splitDecimal(lit)
+	if sig == "" {
+		// All-zero significand: exactly zero whatever the exponent
+		// ("0.0", "-0.0", "0e999999"). Zero is not negative.
 		return
 	}
-	if n != math.Trunc(n) {
+	if exp < 0 {
+		// A nonzero digit remains below the decimal point: the value
+		// is not integral. Decided from digits, so full underflows
+		// ("1e-999") and sub-epsilon offsets ("1.0000000000000000001")
+		// classify as fractional instead of rounding to an integer.
 		facts.Fractional = true
+		facts.Negative = neg
 		return
 	}
-	if n < minInt64Float || n >= maxInt64Float {
+	if len(sig)+exp > maxInt64Digits {
 		facts.Overflow = true
+		facts.Negative = neg
 		return
 	}
-	facts.Value = int64(n)
-	facts.Negative = n < 0 // "-0.0" parses to zero: not negative
+	num := sig + strings.Repeat("0", exp)
+	if neg {
+		num = "-" + num
+	}
+	v, err := strconv.ParseInt(num, 10, 64)
+	if err != nil {
+		// Nineteen digits can still exceed the boundary; ParseInt owns
+		// the exact int64 range check (accepting -9223372036854775808
+		// while rejecting 9223372036854775808).
+		facts.Overflow = true
+		facts.Negative = neg
+		return
+	}
+	facts.Value = v
+	facts.Negative = v < 0
+}
+
+// splitDecimal decomposes a grammar-validated decimal literal into its
+// minimal exact form: the value is sig x 10^exp, negated when neg is
+// set, where sig is the significand's digits stripped of leading and
+// trailing zeros. A literal whose digits are all zero yields sig == "".
+func splitDecimal(lit string) (sig string, exp int, neg bool) {
+	i := 0
+	if lit[i] == '+' || lit[i] == '-' {
+		neg = lit[i] == '-'
+		i++
+	}
+	start := i
+	i, _ = scanDigits(lit, i)
+	digits := lit[start:i]
+	if i < len(lit) && lit[i] == '.' {
+		start = i + 1
+		i, _ = scanDigits(lit, start)
+		frac := lit[start:i]
+		exp = -len(frac)
+		digits += frac
+	}
+	if i < len(lit) {
+		// The grammar guarantees the remainder is a complete exponent
+		// part: (e|E), an optional sign, and at least one digit.
+		exp += parseExponent(lit[i+1:])
+	}
+	sig = strings.TrimLeft(digits, "0")
+	trimmed := strings.TrimRight(sig, "0")
+	exp += len(sig) - len(trimmed)
+	return trimmed, exp, neg
+}
+
+// expSaturation caps a parsed exponent's magnitude. Beyond it the exact
+// exponent is irrelevant: the significand carries at most len(input)
+// digits, so a saturated positive exponent always classifies as overflow
+// and a saturated negative one as fractional (or the significand was all
+// zeros and the value is exactly zero). The cap keeps the accumulation
+// below overflow even for 32-bit int while staying far above any real
+// digit count.
+const expSaturation = 1 << 27
+
+// parseExponent evaluates a grammar-validated exponent body (an optional
+// sign, then one or more digits) with magnitude saturation.
+func parseExponent(s string) int {
+	i := 0
+	neg := false
+	if s[i] == '+' || s[i] == '-' {
+		neg = s[i] == '-'
+		i++
+	}
+	e := 0
+	for ; i < len(s); i++ {
+		e = e*10 + int(s[i]-'0')
+		if e >= expSaturation {
+			// The rest of s is digits; the cap already decides the
+			// classification, so the exact value no longer matters.
+			e = expSaturation
+			break
+		}
+	}
+	if neg {
+		return -e
+	}
+	return e
 }
 
 // isDigit reports whether b is an ASCII decimal digit.
