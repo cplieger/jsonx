@@ -78,19 +78,6 @@ func boundedWidget(body []byte, tagCap, partCap, budget int) (widget, error) {
 	return w, nil
 }
 
-// normalize collapses the documented nil-vs-empty divergence (truncateArray
-// returns nil where stdlib materializes an empty slice) so DeepEqual
-// compares only what callers can observe through element access.
-func normalize(w widget) widget {
-	if len(w.Tags) == 0 {
-		w.Tags = nil
-	}
-	if len(w.Parts) == 0 {
-		w.Parts = nil
-	}
-	return w
-}
-
 func TestParityWithUnmarshal(t *testing.T) {
 	t.Parallel()
 	cases := []struct {
@@ -105,6 +92,7 @@ func TestParityWithUnmarshal(t *testing.T) {
 		{name: "duplicate array merges fieldwise", body: `{"parts":[{"id":1,"kind":"k"},{"id":2,"kind":"m"}],"parts":[{"id":5}]}`},
 		{name: "duplicate array empty replaces", body: `{"tags":["x","y"],"tags":[]}`},
 		{name: "duplicate array null nils", body: `{"tags":["x"],"tags":null}`},
+		{name: "empty array allocates empty non-nil slice", body: `{"tags":[],"parts":[]}`},
 		{name: "null into slice", body: `{"tags":null}`},
 		{name: "null array element is no-op", body: `{"parts":[null]}`},
 		{name: "top-level null", body: `null`},
@@ -122,7 +110,10 @@ func TestParityWithUnmarshal(t *testing.T) {
 			if err != nil {
 				t.Fatalf("bounded decode: %v", err)
 			}
-			if !reflect.DeepEqual(normalize(got), normalize(want)) {
+			// Exact DeepEqual, no normalization: nil-vs-empty parity is part
+			// of the contract (null → nil, `[]` → empty non-nil, absent →
+			// untouched), exactly as json.Unmarshal behaves.
+			if !reflect.DeepEqual(got, want) {
 				t.Errorf("bounded = %+v, want json.Unmarshal parity %+v", got, want)
 			}
 		})

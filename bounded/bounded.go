@@ -15,7 +15,8 @@
 //
 //   - a JSON null where a container is expected is a no-op for objects
 //     (Object leaves the target untouched) and sets the slice nil for
-//     arrays (Array), matching Unmarshal's null handling;
+//     arrays (Array), matching Unmarshal's null handling; an empty array
+//     allocates an empty non-nil slice, also matching Unmarshal;
 //   - duplicate object keys merge field-wise (decode into the existing
 //     value), and duplicate array keys re-expose retained backing within
 //     capacity, truncate to the new length, and replace the slice on an
@@ -207,10 +208,12 @@ func (d *Decoder) End() error {
 // decode into the existing slice (a within-capacity regrow re-exposes the
 // retained backing element, so field-wise merge matches stdlib), the result
 // truncates to the new array's length, and an empty re-occurrence REPLACES
-// the slice (nil, no retained backing a later occurrence could re-expose).
-// A JSON null in place of the array yields nil without error, matching
-// Unmarshal's null-into-slice. Pass maxElems <= 0 for no per-array cap
-// (the aggregate budget still applies).
+// the slice (a fresh empty non-nil slice, no retained backing a later
+// occurrence could re-expose). A JSON null in place of the array yields nil
+// without error, matching Unmarshal's null-into-slice; an empty array `[]`
+// yields an empty non-nil slice, matching Unmarshal's empty-array
+// allocation. Pass maxElems <= 0 for no per-array cap (the aggregate budget
+// still applies).
 func Array[T any](d *Decoder, prior []T, maxElems int, what string, decodeElem func(*T) error) ([]T, error) {
 	ok, err := d.Open('[')
 	if err != nil || !ok {
@@ -251,13 +254,13 @@ func growForIndex[T any](s []T, n int) []T {
 
 // truncateArray finalizes a decoded array at n elements, matching
 // json.Unmarshal's end-of-array semantics: an empty array REPLACES the
-// slice (stdlib MakeSlice(0,0) — no retained backing a later duplicate
-// occurrence could re-expose), a non-empty one truncates in place (stdlib
-// SetLen). Returning nil for the empty case stays inside the documented
-// nil-vs-empty divergence callers cannot observe through element access.
+// slice with a fresh empty non-nil slice (stdlib MakeSlice(0,0) — allocated,
+// so `[]` is distinguishable from null's nil, and no retained backing a
+// later duplicate occurrence could re-expose), a non-empty one truncates in
+// place (stdlib SetLen).
 func truncateArray[T any](s []T, n int) []T {
 	if n == 0 {
-		return nil
+		return []T{}
 	}
 	return s[:n]
 }
