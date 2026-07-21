@@ -1,6 +1,9 @@
 // Package jsonx provides defensive decoding of untrusted upstream JSON -
-// currently one concept: number-or-string integer fields, parsed by one
-// hardened core under an explicit, pluggable tolerance Policy.
+// number-or-string integer fields, parsed by one hardened core under an
+// explicit, pluggable tolerance Policy. The jsonx/bounded subpackage adds
+// the second concern of the same concept: token-level bounded decoding
+// with json.Unmarshal-parity semantics, for schema decoders that must
+// enforce cardinality caps before allocation scales with hostile input.
 //
 // Upstream APIs are inconsistent about numeric fields: the same field
 // arrives as 14 on one endpoint and "14" on another, and odd rows carry

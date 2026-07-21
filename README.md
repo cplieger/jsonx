@@ -7,7 +7,7 @@
 [![OpenSSF Best Practices](https://www.bestpractices.dev/projects/13649/badge)](https://www.bestpractices.dev/projects/13649)
 [![OpenSSF Scorecard](https://api.scorecard.dev/projects/github.com/cplieger/jsonx/badge)](https://scorecard.dev/viewer/?uri=github.com/cplieger/jsonx)
 
-> Defensive decoding of untrusted upstream JSON: number-or-string integer fields under an explicit, pluggable tolerance policy
+> Defensive decoding of untrusted upstream JSON: number-or-string integer fields under an explicit, pluggable tolerance policy, plus bounded token-level decoding with `json.Unmarshal` parity (`jsonx/bounded`)
 
 A standalone Go library for the JSON shape variance every scraper-adjacent app eventually meets: the same numeric field arrives as `14` on one endpoint and `"14"` on another, and odd rows carry `null`, `""`, `"unknown"`, floats, negatives, or absurdly large values. Three apps had hand-rolled this decode with three deliberate — and drifting — policies; only one copy (seadex-scout's) carried integrity guards against NaN, fractional truncation, and out-of-range ids. jsonx is the shared, hardened replacement:
 
@@ -68,6 +68,35 @@ f := jsonx.Classify(data)
 // f.Shape, f.Value, f.WasString(), f.FloatForm, f.Fractional,
 // f.Negative, f.Overflow, f.Padded
 ```
+
+### Bounded token decoding (`jsonx/bounded`)
+
+The `jsonx/bounded` subpackage is the second concern of the same defensive-decoding concept: a token-level decoder toolkit for schema decoders that must bound decode amplification. `json.Unmarshal` materializes the entire value before any caller-side count check can run, so compact serialized elements amplify a wire-capped body into structs and slice backing far beyond the byte cap; a `bounded.Decoder` walks the token stream and rejects hostile cardinality BEFORE each element is allocated — a per-array cap (`ErrArrayCap`) and an aggregate element budget (`ErrElementBudget`), both matched with `errors.Is`.
+
+The building blocks reproduce `encoding/json`'s observable semantics exactly, so a schema decoder built from them is a drop-in for `json.Unmarshal` on well-formed input: null-into-object is a no-op and null-into-array yields nil; duplicate object keys merge field-wise and duplicate arrays re-expose retained backing, truncate, and replace-on-empty (`Array`'s `prior` argument owns that lifecycle); unknown fields are token-skipped without materializing; scalars decode via `json.Decoder.Decode`. Dispatch keys with `strings.EqualFold` for Unmarshal's case-insensitive field matching. The underlying decoder runs with `UseNumber`, so skipping an unknown field never rejects extreme-but-valid numbers (`1e1000`) through float64 conversion.
+
+```go
+d := bounded.NewDecoder(bytes.NewReader(body), maxPageElements)
+var page pbList
+err := d.Object(func(k string) error {
+	switch {
+	case strings.EqualFold(k, "items"):
+		var err error
+		page.Items, err = bounded.Array(d, page.Items, perPage, "page items",
+			func(e *pbEntry) error { return decodeEntry(d, e) })
+		return err
+	case strings.EqualFold(k, "totalItems"):
+		return d.Decode(&page.TotalItems)
+	default:
+		return d.Skip()
+	}
+})
+if err == nil {
+	err = d.End() // reject trailing data, matching json.Unmarshal strictness
+}
+```
+
+Surface: `NewDecoder(r, elementBudget)`, `Object(field func(key string) error)`, `Array[T](d, prior, maxElems, what, decodeElem)`, `Open`/`Close`/`Key`/`Skip`/`Decode`/`More` token primitives, `End`, `Elements` (carry one budget across paginated bodies), sentinels `ErrElementBudget`/`ErrArrayCap`. The schema decode functions stay app code; the toolkit owns only the scaffold that used to drift across hand-rolled copies. A parity fuzz target pins that the walk is never looser than `json.Unmarshal`.
 
 ## The three policies
 
