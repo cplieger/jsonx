@@ -2,6 +2,7 @@ package jsonx_test
 
 import (
 	"math"
+	"runtime"
 	"testing"
 
 	"github.com/cplieger/jsonx"
@@ -106,6 +107,11 @@ func TestClassify(t *testing.T) {
 		{"quoted float at min int64", `"-9223372036854775808.0"`, jsonx.Facts{Shape: jsonx.NumericString, Value: math.MinInt64, FloatForm: true, Negative: true}},
 		{"quoted float below min int64", `"-9223372036854775809.0"`, jsonx.Facts{Shape: jsonx.NumericString, FloatForm: true, Overflow: true, Negative: true}},
 		{"quoted leading-zero float", `"007.5e2"`, jsonx.Facts{Shape: jsonx.NumericString, Value: 750, FloatForm: true}},
+		{"quoted signed positive exponent", `"1e+2"`, jsonx.Facts{Shape: jsonx.NumericString, Value: 100, FloatForm: true}},
+		{"quoted signed negative exponent", `"50e-1"`, jsonx.Facts{Shape: jsonx.NumericString, Value: 5, FloatForm: true}},
+		{"quoted uppercase exponent", `"5E3"`, jsonx.Facts{Shape: jsonx.NumericString, Value: 5000, FloatForm: true}},
+		{"quoted trailing exponent marker", `"5e"`, jsonx.Facts{Shape: jsonx.NonNumericString}},
+		{"quoted exponent sign without digits", `"5e+"`, jsonx.Facts{Shape: jsonx.NonNumericString}},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -138,5 +144,23 @@ func TestFactsWasString(t *testing.T) {
 		if got := jsonx.Classify([]byte(tc.in)).WasString(); got != tc.want {
 			t.Errorf("Classify(%q).WasString() = %v, want %v", tc.in, got, tc.want)
 		}
+	}
+}
+
+// TestClassifyAdversarialExponentBoundedWork pins the documented
+// bounded-work contract: a saturated adversarial exponent must classify
+// without materializing the value's digit string. TotalAlloc is
+// process-global, so this test stays serial (no t.Parallel).
+func TestClassifyAdversarialExponentBoundedWork(t *testing.T) {
+	in := []byte(`1e999999999999999999999`)
+	var before, after runtime.MemStats
+	runtime.ReadMemStats(&before)
+	f := jsonx.Classify(in)
+	runtime.ReadMemStats(&after)
+	if !f.Overflow {
+		t.Fatalf("Classify(%q) = %+v, want Overflow", in, f)
+	}
+	if delta := after.TotalAlloc - before.TotalAlloc; delta > 1<<20 {
+		t.Errorf("Classify(%q) allocated %d bytes, want bounded (< 1 MiB)", in, delta)
 	}
 }

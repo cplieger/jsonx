@@ -41,8 +41,8 @@ type hdbItem struct {
 ### Functional core
 
 ```go
-v, err := jsonx.ParseInt64(data, jsonx.Strict())      // strict: error on anything odd
-v, _   := jsonx.ParseInt64(data, jsonx.TolerantZero()) // tolerant: odd values become 0
+v, err := jsonx.ParseInt64(data, jsonx.Strict())       // strict: error on anything odd
+t, _ := jsonx.ParseInt64(data, jsonx.TolerantZero())   // tolerant: odd values become 0
 ```
 
 ### Composing a policy
