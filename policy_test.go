@@ -252,6 +252,9 @@ func TestAcceptOnValuelessGateFailsClosed(t *testing.T) {
 func TestParseErrorTaxonomy(t *testing.T) {
 	t.Parallel()
 	strict := jsonx.Strict()
+	rejectAbsent := jsonx.Strict()
+	rejectAbsent.Null = jsonx.Reject
+	rejectAbsent.EmptyString = jsonx.Reject
 	tests := []struct {
 		name   string
 		in     string
@@ -265,6 +268,8 @@ func TestParseErrorTaxonomy(t *testing.T) {
 		{"padded string", `" 7 "`, strict, jsonx.ReasonPaddedString},
 		{"float form", `"9.0"`, strict, jsonx.ReasonFloatForm},
 		{"out of range", `9223372036854775808`, strict, jsonx.ReasonOutOfRange},
+		{"null rejected", `null`, rejectAbsent, jsonx.ReasonNull},
+		{"empty string rejected", `""`, rejectAbsent, jsonx.ReasonEmptyString},
 		{"malformed under tolerant", `"broken`, jsonx.TolerantZero(), jsonx.ReasonMalformedString},
 	}
 	for _, tc := range tests {
@@ -317,5 +322,29 @@ func TestParseErrorSnippetBounded(t *testing.T) {
 	}
 	if !strings.HasSuffix(perr.Snippet, "...") {
 		t.Errorf("Snippet = %q, want trailing ellipsis on truncation", perr.Snippet)
+	}
+}
+
+// TestParseErrorSnippetCapBoundary pins the snippet cap's exact boundary:
+// a token of exactly snippetCap bytes embeds whole with no ellipsis, one
+// byte more truncates to the cap plus "...".
+func TestParseErrorSnippetCapBoundary(t *testing.T) {
+	t.Parallel()
+	atCap := `"` + strings.Repeat("x", 39) // 40 bytes, unterminated string
+	_, err := jsonx.ParseInt64([]byte(atCap), jsonx.Strict())
+	var perr *jsonx.ParseError
+	if !errors.As(err, &perr) {
+		t.Fatalf("error = %v, want *jsonx.ParseError", err)
+	}
+	if perr.Snippet != atCap {
+		t.Errorf("Snippet at cap = %q, want the whole %d-byte token", perr.Snippet, len(atCap))
+	}
+	overCap := atCap + "x"
+	_, err = jsonx.ParseInt64([]byte(overCap), jsonx.Strict())
+	if !errors.As(err, &perr) {
+		t.Fatalf("error = %v, want *jsonx.ParseError", err)
+	}
+	if got, want := perr.Snippet, overCap[:40]+"..."; got != want {
+		t.Errorf("Snippet over cap = %q, want %q", got, want)
 	}
 }
