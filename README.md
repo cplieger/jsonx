@@ -9,11 +9,11 @@
 
 > Defensive decoding of untrusted upstream JSON: number-or-string integer fields under an explicit, pluggable tolerance policy, plus bounded token-level decoding with `json.Unmarshal` parity (`jsonx/bounded`)
 
-A standalone Go library for the JSON shape variance every scraper-adjacent app eventually meets: the same numeric field arrives as `14` on one endpoint and `"14"` on another, and odd rows carry `null`, `""`, `"unknown"`, floats, negatives, or absurdly large values. Three apps had hand-rolled this decode with three deliberate — and drifting — policies; only one copy (seadex-scout's) carried integrity guards against NaN, fractional truncation, and out-of-range ids. jsonx is the shared, hardened replacement:
+A standalone Go library for the JSON shape variance every scraper-adjacent app eventually meets: the same numeric field arrives as `14` on one endpoint and `"14"` on another, and odd rows carry `null`, `""`, `"unknown"`, floats, negatives, or absurdly large values. jsonx decodes all of them under one hardened core:
 
-- **One syntactic core.** `Classify` extracts a value's facts — shape, was-string, float form, fractional, negative, overflow, padding — without judging them. It is total: any bytes yield a classification, never a panic.
-- **Pluggable policy.** A `Policy` decides per fact: accept the parsed value, tolerate the oddity as zero, or reject it with a typed `*ParseError`. Three ready-made policies reproduce the origin decoders exactly; custom variants are plain struct copies with a field changed.
-- **Everyone gains the integrity guards.** Fractional values are never truncated (9.9 truncated to 9 would silently point at a different entity), large integers never round-trip through float64, and the accepted range is an explicit part of every policy.
+- **One syntactic core.** `Classify` extracts a value's facts (shape, was-string, float form, fractional, negative, overflow, padding) without judging them. It is total: any bytes yield a classification, never a panic.
+- **Pluggable policy.** A `Policy` decides per fact: accept the parsed value, tolerate the oddity as zero, or reject it with a typed `*ParseError`. Three ready-made policies cover the common stances; custom variants are plain struct copies with a field changed.
+- **Integrity guards in every policy.** Fractional values are never truncated (9.9 truncated to 9 would silently point at a different entity), large integers never round-trip through float64, and the accepted range is an explicit part of every policy.
 
 Standard library only (test dependency: pgregory.net/rapid).
 
@@ -71,9 +71,15 @@ f := jsonx.Classify(data)
 
 ### Bounded token decoding (`jsonx/bounded`)
 
-The `jsonx/bounded` subpackage is the second concern of the same defensive-decoding concept: a token-level decoder toolkit for schema decoders that must bound decode amplification. `json.Unmarshal` materializes the entire value before any caller-side count check can run, so compact serialized elements amplify a wire-capped body into structs and slice backing far beyond the byte cap; a `bounded.Decoder` walks the token stream and rejects hostile cardinality BEFORE each element is allocated — a per-array cap (`ErrArrayCap`) and an aggregate element budget (`ErrElementBudget`), both matched with `errors.Is`.
+The `jsonx/bounded` subpackage is a token-level decoder toolkit for schema decoders that must bound decode amplification. `json.Unmarshal` materializes the entire value before any caller-side count check can run, so compact serialized elements amplify a wire-capped body into structs and slice backing far beyond the byte cap. A `bounded.Decoder` walks the token stream and rejects hostile cardinality BEFORE each element is allocated: a per-array cap (`ErrArrayCap`) and an aggregate element budget (`ErrElementBudget`), both matched with `errors.Is`.
 
-The building blocks reproduce `encoding/json`'s observable semantics exactly, so a schema decoder built from them is a drop-in for `json.Unmarshal` on well-formed input: null-into-object is a no-op and null-into-array yields nil; duplicate object keys merge field-wise and duplicate arrays re-expose retained backing, truncate, and replace-on-empty (`Array`'s `prior` argument owns that lifecycle); unknown fields are token-skipped without materializing; scalars decode via `json.Decoder.Decode`. Dispatch keys with `strings.EqualFold` for Unmarshal's case-insensitive field matching. The underlying decoder runs with `UseNumber`, so skipping an unknown field never rejects extreme-but-valid numbers (`1e1000`) through float64 conversion.
+The building blocks reproduce `encoding/json`'s observable semantics exactly, so a schema decoder built from them is a drop-in for `json.Unmarshal` on well-formed input:
+
+- Null-into-object is a no-op; null-into-array yields nil.
+- Duplicate object keys merge field-wise; duplicate arrays re-expose retained backing, truncate, and replace-on-empty (`Array`'s `prior` argument owns that lifecycle).
+- Unknown fields are token-skipped without materializing; scalars decode via `json.Decoder.Decode`.
+- Dispatch keys with `strings.EqualFold` for Unmarshal's case-insensitive field matching.
+- The underlying decoder runs with `UseNumber`, so skipping an unknown field never rejects extreme-but-valid numbers (`1e1000`) through float64 conversion.
 
 ```go
 d := bounded.NewDecoder(bytes.NewReader(body), maxPageElements)
@@ -96,17 +102,23 @@ if err == nil {
 }
 ```
 
-Surface: `NewDecoder(r, elementBudget)`, `Object(field func(key string) error)`, `Array[T](d, prior, maxElems, what, decodeElem)`, `Open`/`Close`/`Key`/`Skip`/`Decode`/`More` token primitives, `End`, `Elements` (carry one budget across paginated bodies), sentinels `ErrElementBudget`/`ErrArrayCap`. The schema decode functions stay app code; the toolkit owns only the scaffold that used to drift across hand-rolled copies. A parity fuzz target pins that the walk is never looser than `json.Unmarshal`.
+The schema decode functions stay app code; the toolkit owns only the walk scaffold. The walk is never looser than `json.Unmarshal`.
+
+## API
+
+One line per concern; symbol depth lives in the [Go Reference](https://pkg.go.dev/github.com/cplieger/jsonx).
+
+- **Policies:** `Policy`, `Disposition` (`Reject`/`Zero`/`Accept`), and the presets `TolerantZero()`, `Strict()`, `StrictAbsentZero()`. A policy is a plain struct value deciding each fact's outcome; the zero value rejects everything except the literal 0.
+- **Parsing:** `Classify(data) Facts` (total syntactic fact extraction, never panics), `ParseInt64(data, policy)`, the field types `TolerantInt` / `StrictInt` / `StrictAbsentZeroInt` (`json.Unmarshaler`, one per preset), and the typed rejection `*ParseError` carrying a `Reason` constant per gate.
+- **`jsonx/bounded`:** `NewDecoder(r, elementBudget)`, `Object`, generic `Array[T]`, token primitives `Open`/`Close`/`Key`/`Skip`/`Decode`/`More`, `End` (trailing-data strictness), `Elements` (carry one budget across paginated bodies), sentinels `ErrElementBudget`/`ErrArrayCap`. Token-level decoding that rejects hostile cardinality before each element is allocated.
 
 ## The three policies
 
-Each shipped policy reproduces one origin decoder's pinned behavior; the origin apps' test suites are the acceptance spec.
-
-| Policy | Origin | Semantics |
-| --- | --- | --- |
-| `TolerantZero()` | seadex-scout's Fribb id decoder (`flexInt`) | Every odd shape or invalid value decodes to 0 — an upstream placeholder must neither fail the record nor masquerade as a valid id. Integral float forms accepted (`"9.0"` → 9, `"1e3"` → 1000), fractional zeroed (never truncated), range pinned to [0, MaxInt32]. Only a malformed JSON string errors. |
-| `Strict()` | subflux's provider `ParseFlexInt` core | Bare or quoted decimal integer anywhere in int64; `null` and `""` tolerated as 0; everything else — float forms, padded strings, non-numeric strings, other shapes, overflow, empty input — is an error. |
-| `StrictAbsentZero()` | plex-language-sync's `FlexInt` | `Strict()`, plus zero-length input tolerated as 0 (the pre-flex `json.Number` absent-field fallback its tests pin). Identical in every other field (drift-guarded by test). |
+| Policy | Semantics |
+| --- | --- |
+| `TolerantZero()` | Every odd shape or invalid value decodes to 0: an upstream placeholder must neither fail the record nor masquerade as a valid id. Integral float forms accepted (`"9.0"` → 9, `"1e3"` → 1000), fractional zeroed (never truncated), range pinned to [0, MaxInt32]. Only a malformed JSON string errors. |
+| `Strict()` | Bare or quoted decimal integer anywhere in int64; `null` and `""` tolerated as 0; everything else is an error: float forms, padded strings, non-numeric strings, other shapes, overflow, empty input. |
+| `StrictAbsentZero()` | `Strict()`, plus zero-length input tolerated as 0 (an absent field decodes as zero instead of erroring). Identical in every other field. |
 
 Behavior matrix (`v, err` per input):
 
@@ -126,7 +138,7 @@ Behavior matrix (`v, err` per input):
 | `{}`, `[1]`, `true`, garbage | 0 | error | error |
 | `"unterminated` | error | error | error |
 
-The two per-caller wrappers in subflux compose as pure policies too (pinned by tests): **hdbits** (reject null and non-positive ids) is `Strict()` with `Null`/`EmptyString` rejected and `MinValue: 1`; **subsource** (lenient, any error → 0) is the all-`Zero` policy over the full int64 range.
+Other stances compose the same way: a fully lenient decoder (any error → 0) is the all-`Zero` policy over the full int64 range.
 
 ## Facts and gate order
 
@@ -135,37 +147,29 @@ The two per-caller wrappers in subflux compose as pure policies too (pinned by t
 1. Non-numeric shapes dispatch on `Shape`: `Empty`, `Null`, `EmptyString`, `MalformedString`, `NonNumericString`, `Other` → the matching `Disposition` (`Zero` or `Reject`).
 2. Numeric values then pass `PaddedString` → `FloatForm` → `Fractional` → range (`MinValue`/`MaxValue`, including int64 overflow → `OutOfRange`).
 
-`Disposition` is fail-closed: its zero value is `Reject`, and `Accept` is meaningful only where a usable integer exists (`PaddedString`, `FloatForm`) — on any other gate it is treated as `Reject`, never as silent acceptance. There is deliberately no truncation path: `Fractional` can only zero or reject. A zero-value `Policy` rejects everything except the literal 0.
+`Disposition` is fail-closed: its zero value is `Reject`, and `Accept` is meaningful only where a usable integer exists (`PaddedString`, `FloatForm`); on any other gate it is treated as `Reject`, never as silent acceptance. There is deliberately no truncation path: `Fractional` can only zero or reject. A zero-value `Policy` rejects everything except the literal 0.
 
 Rejections are typed: match with `errors.As` against `*jsonx.ParseError`, which carries the `Reason` (which gate fired), the full `Facts`, and a bounded snippet of the offending bytes.
 
-## Hardening deltas vs the hand-rolled originals
+## Accepted number grammar
 
-The origin decoders leaned on raw `strconv` parsers, whose grammar is looser than any of them intended. jsonx accepts only decimal number forms; the deltas are deliberate and none is pinned by an origin test:
+jsonx accepts only decimal number forms, a deliberately tighter grammar than raw `strconv` parsing:
 
-- Quoted hex floats (`"0x1p2"`), `"Inf"`/`"NaN"` words, and digit-separator underscores (`"1_000"`) — accepted by `strconv.ParseFloat`, so silently accepted by the tolerant origin — now classify as non-numeric strings.
+- Quoted hex floats (`"0x1p2"`), `"Inf"`/`"NaN"` words, and digit-separator underscores (`"1_000"`) classify as non-numeric strings, even though `strconv.ParseFloat` would accept them.
 - Only ASCII JSON whitespace counts as padding; a Unicode-space-padded token stays garbage.
-- Integer literals parse via `strconv.ParseInt` across the whole int64 range — never through float64, whose rounding corrupts ids above 2^53 (the tolerant origin funneled everything through float64; harmless under its MaxInt32 bound, wrong for wider bounds).
-- Float-form literals (`"9.0"`, `1e3`) are classified on their decimal digits, never converted through float64 either: integrality, range, and the exact value are decided from significand and exponent. `9007199254740993.0` (2^53+1, the first integer binary64 cannot represent) decodes exactly instead of rounding to 2^53, a full underflow (`1e-999`) classifies as fractional instead of collapsing to an integral zero, and the int64 boundary is exact — `"9223372036854775807.0"` is MaxInt64, one more overflows. Adversarially long exponents saturate, so classification work stays bounded by input length.
+- Integer literals parse via `strconv.ParseInt` across the whole int64 range, never through float64, whose rounding corrupts ids above 2^53.
+- Float-form literals (`"9.0"`, `1e3`) never pass through float64 either: integrality, range, and the exact value are decided from the decimal digits. `9007199254740993.0` (2^53+1, the first integer binary64 cannot represent) decodes exactly instead of rounding to 2^53. A full underflow (`1e-999`) classifies as fractional, not as an integral zero. The int64 boundary is exact: `"9223372036854775807.0"` is MaxInt64; one more overflows. Adversarially long exponents saturate, so classification work stays bounded by input length.
 
-Quoted-number reality is still honored: leading zeros (`"007"`) and a leading `+` (`"+5"`) parse in string form (all three origins accepted them via `Atoi`/`ParseFloat`), while bare tokens must be exact JSON grammar — as every origin already required.
+Quoted-number reality is still honored: leading zeros (`"007"`) and a leading `+` (`"+5"`) parse in string form, while bare tokens must be exact JSON number grammar.
 
-## Adoption notes
-
-The origin apps keep their exported type names and pinned error prefixes by swapping method bodies, not types:
-
-- **seadex-scout** — `flexInt.UnmarshalJSON` body becomes reset + `jsonx.ParseInt64(b, jsonx.TolerantZero())`; `setNumber` and the ParseFloat funnel are deleted. The malformed-string error propagation and the duplicate-key reset invariant its tests pin are library behavior (`TolerantInt` pins both).
-- **subflux** — `provider.ParseFlexInt` becomes a shim over `jsonx.ParseInt64(data, jsonx.Strict())` (wrap the error to keep the `flexint:` message shape). The hdbits and subsource wrappers keep their provider-specific error text, or migrate to the composed policies above.
-- **plex-language-sync** — `FlexInt.UnmarshalJSON` becomes `jsonx.ParseInt64(data, jsonx.StrictAbsentZero())` with errors wrapped under its pinned `flexint:` prefix.
-
-## Unsupported by design
+## Unsupported by Design
 
 | Feature | Rationale |
 | --- | --- |
-| Truncating fractional values | Silent data corruption: 9.9 truncated to 9 points at a different entity. The tolerant origin explicitly refused it; `Fractional` has no `Accept`. |
+| Truncating fractional values | Silent data corruption: 9.9 truncated to 9 points at a different entity. `Fractional` has no `Accept`. |
 | Float-valued fields | This library targets integer ids/counts. Decode real floats with `float64` or `json.Number`. |
 | Wire-form round-tripping | Field types marshal as plain numbers via their underlying int64; the original number-vs-string form is not preserved. |
-| Tolerant string/array/object decoding | seadex-scout's `flexString`/`stringList`/`tmdbID` stay app-shaped: only the number-or-string integer is duplicated across apps. Candidates for extraction if a second consumer appears. |
+| Tolerant string/array/object decoding | This library targets the number-or-string integer case; tolerant decoding of other shapes stays application code. |
 | `json.Number` replacement | Different concept: `json.Number` defers parsing to every reader; jsonx parses once under an explicit policy. |
 
 ## Disclaimer
@@ -176,4 +180,4 @@ This project was built with AI-assisted tooling using [Claude](https://claude.co
 
 ## License
 
-GPL-3.0 — see [LICENSE](LICENSE).
+GPL-3.0. See [LICENSE](LICENSE).
