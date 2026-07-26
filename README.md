@@ -104,13 +104,27 @@ if err == nil {
 
 The schema decode functions stay app code; the toolkit owns only the walk scaffold. The walk is never looser than `json.Unmarshal`.
 
+`bounded.Preflight` covers the other half of the same concern. Where the `Decoder` bounds what a schema decode ALLOCATES, `Preflight` is a standalone pass that rejects a body whose STRUCTURE is ambiguous or unbounded before any decode runs:
+
+```go
+if err := bounded.Preflight(bytes.NewReader(body)); err != nil {
+	return err // ErrDuplicateKey or ErrMaxDepth
+}
+// same bytes now safe to hand to json.Unmarshal or a Decoder walk
+```
+
+- **Duplicate object keys** (`ErrDuplicateKey`): `encoding/json` accepts a repeated key and applies the LAST occurrence, discarding the earlier value unseen — so a body carrying a real value and then a `null` for the same key decodes as the `null`, and nothing downstream can tell it happened. Matching is case-insensitive, because `encoding/json` matches struct fields case-insensitively too: `"media"` and `"Media"` address one field and are equally ambiguous.
+- **Nesting depth** (`ErrMaxDepth`): `json.Decoder.Token` does not apply `encoding/json`'s own nesting limit, so a token walk over an all-opens body recurses once per byte. `MaxDepth` mirrors the stdlib ceiling.
+
+It is deliberately the opposite fail direction from `Object` and `Array`, which reproduce Unmarshal's duplicate-key merge: a schema decoder must behave exactly like the stdlib, while a caller that cannot tolerate the ambiguity at all rejects the body before decoding it. Content policy stays the caller's — `Preflight` takes no view of which keys or values are acceptable, and invalid UTF-8 is likewise not its concern.
+
 ## API
 
 One line per concern; symbol depth lives in the [Go Reference](https://pkg.go.dev/github.com/cplieger/jsonx).
 
 - **Policies:** `Policy`, `Disposition` (`Reject`/`Zero`/`Accept`), and the presets `TolerantZero()`, `Strict()`, `StrictAbsentZero()`. A policy is a plain struct value deciding each fact's outcome; the zero value rejects everything except the literal 0.
 - **Parsing:** `Classify(data) Facts` (total syntactic fact extraction, never panics), `ParseInt64(data, policy)`, the field types `TolerantInt` / `StrictInt` / `StrictAbsentZeroInt` (`json.Unmarshaler`, one per preset), and the typed rejection `*ParseError` carrying a `Reason` constant per gate.
-- **`jsonx/bounded`:** `NewDecoder(r, elementBudget)`, `Object`, generic `Array[T]`, token primitives `Open`/`Close`/`Key`/`Skip`/`Decode`/`More`, `End` (trailing-data strictness), `Elements` (carry one budget across paginated bodies), sentinels `ErrElementBudget`/`ErrArrayCap`. Token-level decoding that rejects hostile cardinality before each element is allocated.
+- **`jsonx/bounded`:** `NewDecoder(r, elementBudget)`, `Object`, generic `Array[T]`, token primitives `Open`/`Close`/`Key`/`Skip`/`Decode`/`More`, `End` (trailing-data strictness), `Elements` (carry one budget across paginated bodies), sentinels `ErrElementBudget`/`ErrArrayCap`. Token-level decoding that rejects hostile cardinality before each element is allocated. Plus `Preflight(r)` with `MaxDepth`, `ErrDuplicateKey`, `ErrMaxDepth`: the standalone structural gate that rejects an ambiguous or unbounded body ahead of any decode.
 
 ## The three policies
 

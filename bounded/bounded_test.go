@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"reflect"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -245,5 +246,188 @@ func TestDuplicateArrayRegrowReExposesBacking(t *testing.T) {
 	want := []part{{ID: 5, Kind: "k"}}
 	if !reflect.DeepEqual(got.Parts, want) {
 		t.Errorf("Parts = %+v, want %+v (merge into retained backing, truncated)", got.Parts, want)
+	}
+}
+
+// TestPreflightAcceptsUnambiguousBodies pins that the preflight is a gate on
+// STRUCTURE only: every shape a schema decoder legitimately meets - nesting,
+// repeated keys in SIBLING objects, keys differing by more than case - passes
+// untouched.
+func TestPreflightAcceptsUnambiguousBodies(t *testing.T) {
+	t.Parallel()
+	bodies := []string{
+		`null`,
+		`1`,
+		`"s"`,
+		`{}`,
+		`[]`,
+		`{"name":"a","count":2}`,
+		`{"a":{"b":{"c":[1,2,{"d":null}]}}}`,
+		`[{"id":1},{"id":1},{"id":1}]`,
+		`{"outer":{"id":1},"other":{"id":2}}`,
+		`{"id":1,"ID_":2}`,
+		`{"":1}`,
+		// UseNumber means an out-of-float64-range literal is structurally fine,
+		// matching json.Unmarshal's own field skipping.
+		`{"big":1e1000}`,
+	}
+	for _, body := range bodies {
+		t.Run(body, func(t *testing.T) {
+			t.Parallel()
+			if err := bounded.Preflight(strings.NewReader(body)); err != nil {
+				t.Errorf("Preflight(%q) = %v, want it accepted", body, err)
+			}
+			if !json.Valid([]byte(body)) {
+				t.Errorf("json.Valid(%q) = false; the acceptance case is stale", body)
+			}
+		})
+	}
+}
+
+// TestPreflightRejectsDuplicateKeys pins the fail-closed half: the repeat is
+// rejected wherever it sits, and the match is case-insensitive because
+// encoding/json resolves struct fields case-insensitively, so the two
+// spellings address one field and are equally ambiguous. Each body is
+// cross-checked against json.Unmarshal to prove the stdlib ACCEPTS it - the
+// silent tolerance being closed here.
+func TestPreflightRejectsDuplicateKeys(t *testing.T) {
+	t.Parallel()
+	bodies := []string{
+		`{"name":"a","name":"b"}`,
+		`{"tags":["x"],"tags":null}`,
+		`{"NAME":"a","name":"b"}`,
+		`{"Name":"a","nAMe":"b"}`,
+		`{"":1,"":2}`,
+		`{"outer":{"id":1,"ID":2}}`,
+		`[{"ok":1},{"id":1,"id":2}]`,
+	}
+	for _, body := range bodies {
+		t.Run(body, func(t *testing.T) {
+			t.Parallel()
+			err := bounded.Preflight(strings.NewReader(body))
+			if !errors.Is(err, bounded.ErrDuplicateKey) {
+				t.Errorf("Preflight(%q) = %v, want ErrDuplicateKey", body, err)
+			}
+			// The stdlib ACCEPTS every one of these, resolving the repeat to
+			// its last occurrence: that silent tolerance is what the preflight
+			// exists to close, so a case the stdlib starts rejecting is stale.
+			var v any
+			if unmarshalErr := json.Unmarshal([]byte(body), &v); unmarshalErr != nil {
+				t.Errorf("json.Unmarshal(%q) = %v; the ambiguity case is stale", body, unmarshalErr)
+			}
+		})
+	}
+}
+
+// TestPreflightKeyFoldMatchesEqualFold pins the fold canonicalization against
+// the semantics it stands in for: two sibling keys collide exactly when
+// strings.EqualFold says they do. The fold exists only to make that test
+// O(keys) instead of O(keys^2), so any divergence is a bug in the
+// optimization, not a policy choice.
+func TestPreflightKeyFoldMatchesEqualFold(t *testing.T) {
+	t.Parallel()
+	pairs := [][2]string{
+		{"k", "K"},
+		{"media", "Media"},
+		{"s", "S"},
+		{"\u017f", "S"}, // LATIN SMALL LETTER LONG S folds to 's'
+		{"\u0131", "I"}, // DOTLESS I does NOT fold to ASCII 'i'
+		{"\u212a", "K"}, // KELVIN SIGN folds to 'k'
+		{"\u00e9", "\u00c9"},
+		{"a", "b"},
+		{"", "x"},
+	}
+	for _, p := range pairs {
+		t.Run(p[0]+"|"+p[1], func(t *testing.T) {
+			t.Parallel()
+			body, err := json.Marshal(map[string]int{p[0]: 1})
+			if err != nil {
+				t.Fatalf("marshal: %v", err)
+			}
+			second, err := json.Marshal(map[string]int{p[1]: 2})
+			if err != nil {
+				t.Fatalf("marshal: %v", err)
+			}
+			// Splice the two single-key objects into one two-key object.
+			joined := string(body[:len(body)-1]) + "," + string(second[1:])
+			collides := errors.Is(bounded.Preflight(strings.NewReader(joined)), bounded.ErrDuplicateKey)
+			if want := strings.EqualFold(p[0], p[1]); collides != want {
+				t.Errorf("Preflight(%q) collision = %v, want strings.EqualFold = %v", joined, collides, want)
+			}
+		})
+	}
+}
+
+// TestPreflightRejectsOverDepth pins the ceiling json.Decoder.Token does not
+// apply itself: the all-opens body is rejected by the depth bound rather than
+// by running one stack frame per byte to find out it is truncated.
+func TestPreflightRejectsOverDepth(t *testing.T) {
+	t.Parallel()
+	deep := strings.Repeat("[", bounded.MaxDepth+10)
+	if err := bounded.Preflight(strings.NewReader(deep)); !errors.Is(err, bounded.ErrMaxDepth) {
+		t.Errorf("Preflight(%d open brackets) = %v, want ErrMaxDepth", bounded.MaxDepth+10, err)
+	}
+	// One container short of the ceiling is a depth question only: the body is
+	// truncated, so it still fails - but NOT with ErrMaxDepth.
+	shallow := strings.Repeat("[", bounded.MaxDepth-1)
+	if err := bounded.Preflight(strings.NewReader(shallow)); errors.Is(err, bounded.ErrMaxDepth) {
+		t.Errorf("Preflight(%d open brackets) = ErrMaxDepth, want the depth bound not to fire", bounded.MaxDepth-1)
+	}
+}
+
+// TestPreflightAcceptsKeyDenseObject pins the O(keys) cost of the
+// fold-canonicalized set: a wide object of distinct keys is accepted, which an
+// O(keys^2) EqualFold scan would also do - but only after quadratic work on an
+// upstream-controlled key count.
+func TestPreflightAcceptsKeyDenseObject(t *testing.T) {
+	t.Parallel()
+	var b strings.Builder
+	b.WriteByte('{')
+	for i := range 20000 {
+		if i > 0 {
+			b.WriteByte(',')
+		}
+		b.WriteString(`"k`)
+		b.WriteString(strconv.Itoa(i))
+		b.WriteString(`":1`)
+	}
+	b.WriteByte('}')
+	if err := bounded.Preflight(strings.NewReader(b.String())); err != nil {
+		t.Errorf("Preflight(key-dense object) = %v, want it accepted", err)
+	}
+}
+
+// TestPreflightRejectsTrailingData pins that the preflight is never looser
+// than the decode step it precedes: whole-input strictness, like End.
+func TestPreflightRejectsTrailingData(t *testing.T) {
+	t.Parallel()
+	for _, body := range []string{`{} {}`, `{"name":"a"} x`, `null 1`, `1 2`} {
+		if err := bounded.Preflight(strings.NewReader(body)); err == nil {
+			t.Errorf("Preflight(%q) = nil error, want trailing data rejected", body)
+		}
+	}
+}
+
+// TestPreflightBoundsKeySnippet pins that an oversized untrusted key cannot
+// balloon the error string, and that the rendered message stays single-line
+// even when the key carries control bytes.
+func TestPreflightBoundsKeySnippet(t *testing.T) {
+	t.Parallel()
+	long := strings.Repeat("k", 5000)
+	err := bounded.Preflight(strings.NewReader(`{"` + long + `":1,"` + long + `":2}`))
+	if !errors.Is(err, bounded.ErrDuplicateKey) {
+		t.Fatalf("Preflight(oversized duplicate key) = %v, want ErrDuplicateKey", err)
+	}
+	if len(err.Error()) > 200 {
+		t.Errorf("error string is %d bytes, want the key snippet bounded: %q", len(err.Error()), err.Error())
+	}
+
+	withControl := `{"a\nb":1,"a\nb":2}`
+	err = bounded.Preflight(strings.NewReader(withControl))
+	if !errors.Is(err, bounded.ErrDuplicateKey) {
+		t.Fatalf("Preflight(%q) = %v, want ErrDuplicateKey", withControl, err)
+	}
+	if strings.ContainsAny(err.Error(), "\n\r") {
+		t.Errorf("error string carries a raw newline: %q", err.Error())
 	}
 }

@@ -33,6 +33,16 @@
 // syntactically valid values like 1e1000 that json.Unmarshal's field
 // skipping accepts). Decoding into typed int/string/bool fields is
 // unaffected; a caller decoding into an untyped any receives json.Number.
+//
+// Preflight is the other half of the same concern: where the Decoder bounds
+// what a schema decode ALLOCATES, Preflight is a standalone pass that rejects
+// a body whose STRUCTURE is ambiguous or unbounded before any decode runs — a
+// repeated object key (which json.Unmarshal resolves to the last occurrence,
+// destroying the evidence that it happened) and nesting past MaxDepth (which
+// json.Decoder.Token does not bound on its own). It is the fail-closed
+// counterpart to Object and Array, which deliberately REPRODUCE Unmarshal's
+// duplicate-key merge: a schema decoder must match the stdlib, while a caller
+// that cannot tolerate the ambiguity rejects the body outright.
 package bounded
 
 import (
@@ -40,6 +50,9 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"strings"
+	"unicode"
+	"unicode/utf8"
 )
 
 // Sentinel errors, matched with errors.Is through the wrapped errors the
@@ -53,7 +66,31 @@ var (
 	// ErrArrayCap reports that one array exceeded its per-Array cardinality
 	// cap. The wrapping error names the array via Array's what argument.
 	ErrArrayCap = errors.New("jsonx/bounded: array cardinality cap exceeded")
+	// ErrDuplicateKey reports that Preflight found an object repeating a key
+	// (matched case-insensitively). The wrapping error carries a bounded,
+	// quoted snippet of the offending key.
+	ErrDuplicateKey = errors.New("jsonx/bounded: duplicate object key")
+	// ErrMaxDepth reports that Preflight found more than MaxDepth nested
+	// containers open at once.
+	ErrMaxDepth = errors.New("jsonx/bounded: maximum nesting depth exceeded")
 )
+
+// MaxDepth is the nesting ceiling Preflight enforces: at most MaxDepth
+// containers open at once. It mirrors encoding/json's own scanner limit, so a
+// body Preflight rejects for depth is one the decode step would have rejected
+// anyway - only rejected before a token walk has built the stack to find out.
+// The explicit ceiling is necessary because json.Decoder.Token does NOT apply
+// that limit itself: a token walk over a 1 MiB body of '[' otherwise recurses
+// once per byte (~1M frames, measured at 206 MB RSS inside a 256 MiB
+// container).
+const MaxDepth = 10000
+
+// maxKeySnippet bounds the untrusted key text a duplicate-key error renders,
+// so an oversized upstream key cannot balloon an error string or a log line.
+// The key is rendered with %q, which escapes controls and newlines, so the
+// message stays single-line and safe to log as-is; a caller with a stricter
+// text policy applies it to its own wrapping message.
+const maxKeySnippet = 64
 
 // Decoder walks one JSON value as a token stream, charging every decoded
 // array element against an aggregate budget. It is not safe for concurrent
@@ -263,4 +300,138 @@ func truncateArray[T any](s []T, n int) []T {
 		return []T{}
 	}
 	return s[:n]
+}
+
+// Preflight walks one complete JSON value from r and rejects the two
+// structural defects json.Unmarshal silently tolerates. It decodes nothing
+// into a caller value.
+//
+// Duplicate object keys: encoding/json accepts a repeated key and applies the
+// LAST occurrence to the struct field, discarding the earlier value unseen. A
+// body carrying a real value and then a null for the same key therefore
+// decodes as the null, and no schema decoder downstream can tell that
+// happened - the evidence is gone before it is reachable. Matching is
+// case-insensitive because encoding/json matches struct FIELDS
+// case-insensitively too, so "media" and "Media" address the same field and
+// are equally ambiguous. The first repeat fails with ErrDuplicateKey. Note
+// this is the opposite fail direction from Object and Array, which reproduce
+// Unmarshal's duplicate-key MERGE semantics: a schema decoder must behave
+// exactly like the stdlib, while a caller that cannot tolerate the ambiguity
+// at all rejects the body before decoding it.
+//
+// Nesting depth: bounded at MaxDepth (see that constant for why the token
+// stream needs its own ceiling). Over-deep input fails with ErrMaxDepth.
+//
+// It is a PREFLIGHT, not a decode: run it over the whole body, then hand the
+// same bytes to json.Unmarshal or a Decoder schema walk. It reads r to
+// completion and rejects trailing data after the top-level value (End's
+// whole-input strictness), so it never accepts a body the decode step would
+// reject. Content policy stays the caller's: Preflight takes no view of which
+// keys or values are acceptable, only of whether the structure is unambiguous
+// and bounded. Invalid UTF-8 is likewise not its concern - json.Unmarshal
+// replaces malformed bytes inside strings with U+FFFD rather than failing, and
+// whether that is acceptable depends on what the caller does with the decoded
+// text.
+func Preflight(r io.Reader) error {
+	d := NewDecoder(r, 0)
+	if err := d.preflightValue(0); err != nil {
+		return err
+	}
+	return d.End()
+}
+
+// preflightValue consumes exactly one JSON value, recursing into objects and
+// arrays. A scalar is consumed by the leading Token call; a container is
+// closed by the trailing one. Depth is checked BEFORE recursing, so the frame
+// count is bounded by MaxDepth by construction.
+func (d *Decoder) preflightValue(depth int) error {
+	t, err := d.dec.Token()
+	if err != nil {
+		return err
+	}
+	delim, isDelim := t.(json.Delim)
+	if !isDelim {
+		return nil
+	}
+	if depth >= MaxDepth {
+		return fmt.Errorf("%w: %d", ErrMaxDepth, MaxDepth)
+	}
+	if err := d.preflightContainer(delim, depth); err != nil {
+		return err
+	}
+	return d.Close()
+}
+
+// preflightContainer traverses the members of a container whose opening
+// delimiter preflightValue has read and whose depth it has validated. The
+// closing delimiter stays preflightValue's, so container framing has one
+// owner.
+func (d *Decoder) preflightContainer(delim json.Delim, depth int) error {
+	switch delim {
+	case '{':
+		return d.preflightObject(depth + 1)
+	case '[':
+		for d.dec.More() {
+			if err := d.preflightValue(depth + 1); err != nil {
+				return err
+			}
+		}
+		return nil
+	default:
+		return fmt.Errorf("unexpected JSON delimiter %q", delim)
+	}
+}
+
+// preflightObject consumes an object's members after its opening delimiter,
+// failing on the first repeated key. Keys are held in a fold-canonicalized
+// set, so a key-dense object costs O(keys) rather than the O(keys^2) an
+// EqualFold scan over the accumulated keys would.
+func (d *Decoder) preflightObject(depth int) error {
+	seen := make(map[string]struct{})
+	for d.dec.More() {
+		key, err := d.Key()
+		if err != nil {
+			return err
+		}
+		folded := foldKey(key)
+		if _, dup := seen[folded]; dup {
+			return fmt.Errorf("%w: %q", ErrDuplicateKey, keySnippet(key))
+		}
+		seen[folded] = struct{}{}
+		if err := d.preflightValue(depth); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// foldKey canonicalizes each rune to the smallest member of its simple
+// case-folding orbit, so map equality on the result is exactly
+// strings.EqualFold equality without the per-key linear scan.
+func foldKey(key string) string {
+	var b strings.Builder
+	b.Grow(len(key))
+	for _, r := range key {
+		c := r
+		for f := unicode.SimpleFold(r); f != r; f = unicode.SimpleFold(f) {
+			if f < c {
+				c = f
+			}
+		}
+		b.WriteRune(c)
+	}
+	return b.String()
+}
+
+// keySnippet truncates an untrusted key to maxKeySnippet bytes on a rune
+// boundary, so the error text stays bounded and valid UTF-8.
+func keySnippet(key string) string {
+	if len(key) <= maxKeySnippet {
+		return key
+	}
+	cut := maxKeySnippet
+	for cut > 0 && !utf8.RuneStart(key[cut]) {
+		cut--
+	}
+	return key[:cut]
 }
