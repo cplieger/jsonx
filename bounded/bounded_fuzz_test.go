@@ -13,11 +13,11 @@ import (
 // walk (uncapped, unbudgeted) and json.Unmarshal. Invariants: the walk never
 // panics, and it is never LOOSER than json.Unmarshal — an input the bounded
 // walk accepts must be stdlib-accepted with an EXACTLY DeepEqual result,
-// nil-vs-empty included (null → nil, `[]` → empty non-nil, absent →
-// untouched). Bounded-stricter is allowed by design (caps and budget exist
-// to reject what Unmarshal would materialize), so an Unmarshal-accepted
-// input the walk rejects is not a violation; here with no caps configured
-// the accept sets should in practice coincide.
+// nil-vs-empty included (null → nil for slices AND maps, `[]` / `{}` → empty
+// non-nil, absent → untouched). Bounded-stricter is allowed by design (caps
+// and budget exist to reject what Unmarshal would materialize), so an
+// Unmarshal-accepted input the walk rejects is not a violation; here with no
+// caps configured the accept sets should in practice coincide.
 func FuzzParityWithUnmarshal(f *testing.F) {
 	f.Add([]byte(`{"name":"a","count":2,"tags":["x","y"],"parts":[{"id":1,"kind":"k"},{"id":2}]}`))
 	f.Add([]byte(`{"NAME":"a","Count":2,"TAGS":["x"],"PaRtS":[{"ID":7,"KIND":"k"}]}`))
@@ -25,6 +25,14 @@ func FuzzParityWithUnmarshal(f *testing.F) {
 	f.Add([]byte(`{"tags":["x"],"tags":null}`))
 	f.Add([]byte(`{"big":1e1000,"name":"a"}`))
 	f.Add([]byte(`{"parts":[null]}`))
+	f.Add([]byte(`{"meta":{"a":"1","b":"2"},"specs":{"x":{"id":1,"kind":"k"}}}`))
+	f.Add([]byte(`{"meta":{"a":"1"},"meta":null}`))
+	f.Add([]byte(`{"meta":{"a":"1"},"meta":{}}`))
+	f.Add([]byte(`{"meta":{"a":null},"specs":{"x":null}}`))
+	f.Add([]byte(`{"specs":{"x":{"id":1,"kind":"k"},"x":{"id":2}}}`))
+	f.Add([]byte(`{"nested":{"o":{"a":"1"},"p":{},"q":null}}`))
+	f.Add([]byte(`{"meta":{"a":1}}`))
+	f.Add([]byte(`{"meta":{"a":"1","A":"2"}}`))
 	f.Add([]byte(`null`))
 	f.Add([]byte(`{} {}`))
 	f.Add([]byte(`{"count":"x"}`))

@@ -21,6 +21,11 @@
 //     value), and duplicate array keys re-expose retained backing within
 //     capacity, truncate to the new length, and replace the slice on an
 //     empty re-occurrence — Array owns that lifecycle;
+//   - a JSON object decoded into a Go MAP (Map) charges its entries against
+//     the same aggregate budget the array walk uses, and reproduces
+//     Unmarshal's map semantics, where a null yields nil (as for a slice, not
+//     as for a struct) and a duplicate key REPLACES with a fresh zero value
+//     rather than merging field-wise;
 //   - unknown fields are token-skipped without materializing (Skip);
 //   - scalar values decode via json.Decoder.Decode for stdlib-identical
 //     type handling (Decode).
@@ -59,13 +64,17 @@ import (
 // budget and cap checks return.
 var (
 	// ErrElementBudget reports that the Decoder's aggregate element budget
-	// was exhausted: the total number of array elements decoded (across
-	// every Array call on this Decoder) exceeded the budget given to
-	// NewDecoder.
+	// was exhausted: the total number of array elements and map entries
+	// decoded (across every Array and Map call on this Decoder) exceeded the
+	// budget given to NewDecoder.
 	ErrElementBudget = errors.New("jsonx/bounded: element budget exceeded")
 	// ErrArrayCap reports that one array exceeded its per-Array cardinality
 	// cap. The wrapping error names the array via Array's what argument.
 	ErrArrayCap = errors.New("jsonx/bounded: array cardinality cap exceeded")
+	// ErrMapCap reports that one map exceeded its per-Map cardinality cap.
+	// The wrapping error names the map via Map's what argument, and never a
+	// key: at this boundary the keys are attacker-shaped text.
+	ErrMapCap = errors.New("jsonx/bounded: map cardinality cap exceeded")
 	// ErrDuplicateKey reports that Preflight found an object repeating a key
 	// (matched case-insensitively). The wrapping error carries a bounded,
 	// quoted snippet of the offending key.
@@ -93,8 +102,8 @@ const MaxDepth = 10000
 const maxKeySnippet = 64
 
 // Decoder walks one JSON value as a token stream, charging every decoded
-// array element against an aggregate budget. It is not safe for concurrent
-// use.
+// array element and map entry against an aggregate budget. It is not safe for
+// concurrent use.
 type Decoder struct {
 	dec      *json.Decoder
 	limit    int
@@ -102,19 +111,20 @@ type Decoder struct {
 }
 
 // NewDecoder returns a Decoder reading from r with the given aggregate
-// element budget. Every array element decoded through Array is charged
-// against the budget, whichever array it belongs to, so deeply nested or
-// repeated arrays cannot multiply a per-array cap. elementBudget <= 0 means
-// no aggregate budget (per-array caps still apply).
+// element budget. Every array element decoded through Array and every map
+// entry decoded through Map is charged against the budget, whichever
+// container it belongs to, so deeply nested or repeated containers cannot
+// multiply a per-container cap. elementBudget <= 0 means no aggregate budget
+// (per-container caps still apply).
 func NewDecoder(r io.Reader, elementBudget int) *Decoder {
 	dec := json.NewDecoder(r)
 	dec.UseNumber()
 	return &Decoder{dec: dec, limit: elementBudget}
 }
 
-// Elements reports how many array elements have been charged against the
-// budget so far, so a caller paginating across multiple bodies can carry
-// one budget across Decoders.
+// Elements reports how many array elements and map entries have been charged
+// against the budget so far, so a caller paginating across multiple bodies can
+// carry one budget across Decoders.
 func (d *Decoder) Elements() int { return d.elements }
 
 // More reports whether the current array or object has another element,
@@ -125,7 +135,8 @@ func (d *Decoder) More() bool { return d.dec.More() }
 // stdlib-identical handling for scalar and leaf values.
 func (d *Decoder) Decode(v any) error { return d.dec.Decode(v) }
 
-// count charges one decoded array element against the aggregate budget.
+// count charges one decoded array element or map entry against the aggregate
+// budget.
 func (d *Decoder) count() error {
 	d.elements++
 	if d.limit > 0 && d.elements > d.limit {
@@ -300,6 +311,93 @@ func truncateArray[T any](s []T, n int) []T {
 		return []T{}
 	}
 	return s[:n]
+}
+
+// Map decodes one JSON object into a Go map under the same bounded lifecycle
+// Array gives a slice: per-map cap check BEFORE the entry costs anything (an
+// over-cap map errors with ErrMapCap, named by what), aggregate budget charge
+// BEFORE the entry is read (ErrElementBudget), then key, value, store.
+// decodeValue is invoked once per entry with that entry's key and a pointer to
+// the zero value it must decode into (Decode a scalar, or recurse into Object,
+// Array or Map for a container); the key is passed so a caller with a per-key
+// policy can apply it without a second walk. Pass maxEntries <= 0 for no
+// per-map cap (the aggregate budget still applies).
+//
+// It is a twin of Array rather than an exported entry-charge primitive, and
+// the choice follows the package's shape: every cap and charge here is applied
+// BY the walk, in an order a caller cannot get wrong (cap before charge,
+// charge before the entry is read), and the walk also owns the Unmarshal
+// semantics that go with the container. An exported counter would hand both
+// back to every caller - the order to re-derive per walk, the map's
+// null/duplicate/allocation semantics to re-derive per schema - which is the
+// drift this package was extracted to end. The charge lands before the KEY is
+// read because the key is itself an unbounded allocation from the wire, so a
+// budget that only bounded values would not bound the decode. A caller whose
+// map policy genuinely does not fit this shape keeps the token primitives
+// (Open, Key, Decode, Skip, More, Close) and its own accounting, exactly as it
+// can for arrays - it simply does not participate in this Decoder's aggregate.
+//
+// The map semantics reproduce json.Unmarshal's, which for maps differ from
+// both of the other walks in ways worth stating:
+//
+//   - A JSON null in place of the object yields nil, wiping an already-decoded
+//     earlier occurrence of the same key. That is Unmarshal's null-into-MAP
+//     handling, which follows its null-into-slice (Array) and NOT its
+//     null-into-struct (Object, where a null is a no-op) - so a caller reading
+//     a nil map as a structural sentinel gets that sentinel from a hostile
+//     `"m":null` too, which is the fail-closed direction anyway.
+//   - Each entry decodes into a FRESH zero value, so a duplicate KEY replaces
+//     rather than merging field-wise (`{"a":{"x":1},"a":{"y":2}}` leaves only
+//     y set, where Array's prior would have merged), and a null value stores
+//     the zero value.
+//   - An empty object `{}` allocates an empty non-nil map when prior is nil,
+//     matching Unmarshal's allocation, but does NOT replace a non-nil prior
+//     (Array's empty re-occurrence does replace its slice) - Unmarshal only
+//     allocates a nil map, and an empty object then adds nothing.
+//   - A non-nil prior is decoded INTO, so a duplicate object key merges the
+//     two occurrences' entries and keys absent from the second survive.
+//   - Keys compare by the map's own exact equality: Unmarshal matches struct
+//     FIELDS case-insensitively but map keys case-sensitively, so "a" and "A"
+//     are two entries here.
+//
+// On error the returned map holds the entries decoded so far, exactly as a
+// failed json.Unmarshal leaves them in the caller's map; the error, not the
+// map, is the result.
+func Map[V any](d *Decoder, prior map[string]V, maxEntries int, what string, decodeValue func(key string, v *V) error) (map[string]V, error) {
+	ok, err := d.Open('{')
+	if err != nil {
+		// Nothing was consumed into the map, so the caller's own value stands
+		// - Unmarshal leaves a target untouched when the value is the wrong
+		// shape for it.
+		return prior, err
+	}
+	if !ok {
+		return nil, nil
+	}
+	m := prior
+	if m == nil {
+		m = make(map[string]V)
+	}
+	n := 0
+	for d.dec.More() {
+		if maxEntries > 0 && n >= maxEntries {
+			return m, fmt.Errorf("%s: %w: %d", what, ErrMapCap, maxEntries)
+		}
+		if err := d.count(); err != nil {
+			return m, err
+		}
+		key, err := d.Key()
+		if err != nil {
+			return m, err
+		}
+		var v V
+		if err := decodeValue(key, &v); err != nil {
+			return m, err
+		}
+		m[key] = v
+		n++
+	}
+	return m, d.Close()
 }
 
 // Preflight walks one complete JSON value from r and rejects the two

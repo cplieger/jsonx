@@ -71,12 +71,12 @@ f := jsonx.Classify(data)
 
 ### Bounded token decoding (`jsonx/bounded`)
 
-The `jsonx/bounded` subpackage is a token-level decoder toolkit for schema decoders that must bound decode amplification. `json.Unmarshal` materializes the entire value before any caller-side count check can run, so compact serialized elements amplify a wire-capped body into structs and slice backing far beyond the byte cap. A `bounded.Decoder` walks the token stream and rejects hostile cardinality BEFORE each element is allocated: a per-array cap (`ErrArrayCap`) and an aggregate element budget (`ErrElementBudget`), both matched with `errors.Is`.
+The `jsonx/bounded` subpackage is a token-level decoder toolkit for schema decoders that must bound decode amplification. `json.Unmarshal` materializes the entire value before any caller-side count check can run, so compact serialized elements amplify a wire-capped body into structs and slice backing far beyond the byte cap. A `bounded.Decoder` walks the token stream and rejects hostile cardinality BEFORE each element is allocated: a per-container cap (`ErrArrayCap`, `ErrMapCap`) and one aggregate element budget shared by every array element and map entry (`ErrElementBudget`), all matched with `errors.Is`.
 
 The building blocks reproduce `encoding/json`'s observable semantics exactly, so a schema decoder built from them is a drop-in for `json.Unmarshal` on well-formed input:
 
-- Null-into-object is a no-op; null-into-array yields nil.
-- Duplicate object keys merge field-wise; duplicate arrays re-expose retained backing, truncate, and replace-on-empty (`Array`'s `prior` argument owns that lifecycle).
+- Null-into-object is a no-op; null-into-array yields nil; null-into-map yields nil too (a map follows the slice, not the struct).
+- Duplicate object keys merge field-wise; duplicate arrays re-expose retained backing, truncate, and replace-on-empty (`Array`'s `prior` argument owns that lifecycle); a duplicate MAP key replaces with a fresh zero value instead of merging, exactly as `json.Unmarshal` does for maps.
 - Unknown fields are token-skipped without materializing; scalars decode via `json.Decoder.Decode`.
 - Dispatch keys with `strings.EqualFold` for Unmarshal's case-insensitive field matching.
 - The underlying decoder runs with `UseNumber`, so skipping an unknown field never rejects extreme-but-valid numbers (`1e1000`) through float64 conversion.
@@ -91,6 +91,11 @@ err := d.Object(func(k string) error {
 		page.Items, err = bounded.Array(d, page.Items, perPage, "page items",
 			func(e *pbEntry) error { return decodeEntry(d, e) })
 		return err
+	case strings.EqualFold(k, "labels"):
+		var err error
+		page.Labels, err = bounded.Map(d, page.Labels, perPage, "page labels",
+			func(_ string, v *string) error { return d.Decode(v) })
+		return err
 	case strings.EqualFold(k, "totalItems"):
 		return d.Decode(&page.TotalItems)
 	default:
@@ -101,6 +106,8 @@ if err == nil {
 	err = d.End() // reject trailing data, matching json.Unmarshal strictness
 }
 ```
+
+`Array` and `Map` are twins on purpose, and both charge the ONE aggregate budget: a body cannot be amplified by splitting hostile cardinality across container kinds, which is exactly what happens when a caller hand-walks its maps and counts them itself. The check ORDER — per-container cap, then aggregate charge, then read the entry (a map key is itself an unbounded allocation from the wire) — is the invariant the toolkit owns, and the reason it is a walk rather than an exported counter. A caller whose policy genuinely does not fit either walk keeps the token primitives and its own accounting.
 
 The schema decode functions stay app code; the toolkit owns only the walk scaffold. The walk is never looser than `json.Unmarshal`.
 
@@ -124,7 +131,7 @@ One line per concern; symbol depth lives in the [Go Reference](https://pkg.go.de
 
 - **Policies:** `Policy`, `Disposition` (`Reject`/`Zero`/`Accept`), and the presets `TolerantZero()`, `Strict()`, `StrictAbsentZero()`. A policy is a plain struct value deciding each fact's outcome; the zero value rejects everything except the literal 0.
 - **Parsing:** `Classify(data) Facts` (total syntactic fact extraction, never panics), `ParseInt64(data, policy)`, the field types `TolerantInt` / `StrictInt` / `StrictAbsentZeroInt` (`json.Unmarshaler`, one per preset), and the typed rejection `*ParseError` carrying a `Reason` constant per gate.
-- **`jsonx/bounded`:** `NewDecoder(r, elementBudget)`, `Object`, generic `Array[T]`, token primitives `Open`/`Close`/`Key`/`Skip`/`Decode`/`More`, `End` (trailing-data strictness), `Elements` (carry one budget across paginated bodies), sentinels `ErrElementBudget`/`ErrArrayCap`. Token-level decoding that rejects hostile cardinality before each element is allocated. Plus `Preflight(r)` with `MaxDepth`, `ErrDuplicateKey`, `ErrMaxDepth`: the standalone structural gate that rejects an ambiguous or unbounded body ahead of any decode.
+- **`jsonx/bounded`:** `NewDecoder(r, elementBudget)`, `Object`, generic `Array[T]` and `Map[V]` (slice and map twins, charging one shared aggregate), token primitives `Open`/`Close`/`Key`/`Skip`/`Decode`/`More`, `End` (trailing-data strictness), `Elements` (carry one budget across paginated bodies), sentinels `ErrElementBudget`/`ErrArrayCap`/`ErrMapCap`. Token-level decoding that rejects hostile cardinality before each element is allocated. Plus `Preflight(r)` with `MaxDepth`, `ErrDuplicateKey`, `ErrMaxDepth`: the standalone structural gate that rejects an ambiguous or unbounded body ahead of any decode.
 
 ## The three policies
 
