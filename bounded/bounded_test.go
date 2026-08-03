@@ -393,6 +393,13 @@ func TestPreflightKeyFoldMatchesEqualFold(t *testing.T) {
 // TestPreflightRejectsOverDepth pins the ceiling json.Decoder.Token does not
 // apply itself: the all-opens body is rejected by the depth bound rather than
 // by running one stack frame per byte to find out it is truncated.
+//
+// EXPECTED TO FAIL ON GO 1.27, and that is the tripwire working. jsontext's
+// Decoder enforces its own 10000-container limit during Token and reports it
+// first, so Preflight returns that error instead of ErrMaxDepth. Do NOT relax
+// this assertion to make the build pass: the failure means the sentinel every
+// consumer matches with errors.Is is no longer returned. The remedy is in
+// MaxDepth's doc (lower the ceiling to 9999 so this guard fires first).
 func TestPreflightRejectsOverDepth(t *testing.T) {
 	t.Parallel()
 	deep := strings.Repeat("[", bounded.MaxDepth+10)
