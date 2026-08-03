@@ -80,7 +80,8 @@ var (
 	// quoted snippet of the offending key.
 	ErrDuplicateKey = errors.New("jsonx/bounded: duplicate object key")
 	// ErrMaxDepth reports that Preflight found more than MaxDepth nested
-	// containers open at once.
+	// containers open at once. WARNING: Preflight stops returning this
+	// sentinel on Go 1.27 — see MaxDepth's doc for why and what to change.
 	ErrMaxDepth = errors.New("jsonx/bounded: maximum nesting depth exceeded")
 )
 
@@ -92,6 +93,41 @@ var (
 // that limit itself: a token walk over a 1 MiB body of '[' otherwise recurses
 // once per byte (~1M frames, measured at 206 MB RSS inside a 256 MiB
 // container).
+//
+// Verified on Go 1.26.5: encoding/json's scanner.go sets maxNestingDepth =
+// 10000, json.Unmarshal accepts 10000 and rejects 10001, Decoder.Token accepts
+// 10010 without complaint, and the guard in preflightValue rejects at 10001 —
+// so Preflight's boundary is exactly Unmarshal's, which is what the paragraph
+// above claims.
+//
+// WARNING: both claims above go false on Go 1.27, and Preflight's ERROR
+// IDENTITY changes with them. The v2-backed encoding/json decodes through
+// encoding/json/jsontext, whose Decoder enforces its OWN 10000-container limit
+// during Token — the exact thing this ceiling exists to compensate for. Because
+// the guard here fires on the token that OPENS level 10001, and jsontext
+// refuses to READ that token, jsontext's error always arrives first and this
+// guard becomes unreachable:
+//
+//	Go 1.26:  Token() over 10010 '[' -> 10010 tokens, then io.EOF
+//	          Preflight -> ErrMaxDepth
+//	Go 1.27:  Token() over 10010 '[' -> 10000 tokens, then "exceeded max depth"
+//	          Preflight -> that error, NOT ErrMaxDepth
+//
+// The acceptance set does not change (over-deep input is still rejected), so
+// this is not a safety regression — but errors.Is(err, ErrMaxDepth) stops
+// matching, which is a public contract break for every Preflight consumer
+// (seadex-scout, docker-fclones-scheduler, vibekit).
+//
+// No fix is applied here because every shape of one is wrong on Go 1.26:
+// lowering the ceiling so this guard wins would reject depth-10000 bodies that
+// json.Unmarshal accepts on this toolchain, diverging from the stdlib alignment
+// the paragraph above promises, and translating jsontext's error has no stable
+// hook (jsontext exports ErrDuplicateName and ErrNonStringName but no depth
+// sentinel, and SyntacticError documents its contents as subject to change).
+// When the toolchain moves: lower MaxDepth to 9999 so this guard fires first,
+// correct the two paragraphs above, and pin the new boundary with a test that
+// actually exercises it. See .kiro/steering/go-stdlib-changelog.md, "Preparing
+// for Go 1.27 in this fleet".
 const MaxDepth = 10000
 
 // maxKeySnippet bounds the untrusted key text a duplicate-key error renders,
