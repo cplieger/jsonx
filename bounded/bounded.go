@@ -147,7 +147,9 @@ type Decoder struct {
 }
 
 // NewDecoder returns a Decoder reading from r with the given aggregate
-// element budget. Every array element decoded through Array and every map
+// element budget. Construction through NewDecoder is mandatory: the zero
+// Decoder has no underlying json.Decoder, so every decoding method
+// nil-dereferences. Every array element decoded through Array and every map
 // entry decoded through Map is charged against the budget, whichever
 // container it belongs to, so deeply nested or repeated containers cannot
 // multiply a per-container cap. elementBudget <= 0 means no aggregate budget
