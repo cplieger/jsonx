@@ -7,7 +7,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/cplieger/jsonx"
+	"github.com/cplieger/jsonx/v2"
 )
 
 // parseCase is one policy-table row: input bytes, expected value, and

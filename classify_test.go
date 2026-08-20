@@ -5,7 +5,7 @@ import (
 	"runtime"
 	"testing"
 
-	"github.com/cplieger/jsonx"
+	"github.com/cplieger/jsonx/v2"
 )
 
 // TestClassify pins the syntactic core: shape taxonomy, fact flags, and

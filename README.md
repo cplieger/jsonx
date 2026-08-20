@@ -1,6 +1,6 @@
 # jsonx
 
-[![Go Reference](https://pkg.go.dev/badge/github.com/cplieger/jsonx.svg)](https://pkg.go.dev/github.com/cplieger/jsonx)
+[![Go Reference](https://pkg.go.dev/badge/github.com/cplieger/jsonx/v2.svg)](https://pkg.go.dev/github.com/cplieger/jsonx/v2)
 [![Go version](https://img.shields.io/github/go-mod/go-version/cplieger/jsonx)](https://github.com/cplieger/jsonx/blob/main/go.mod)
 [![Test coverage](https://img.shields.io/endpoint?url=https://raw.githubusercontent.com/cplieger/jsonx/badges/coverage.json)](https://github.com/cplieger/jsonx/actions/workflows/coverage.yml)
 [![Mutation](https://img.shields.io/endpoint?url=https://raw.githubusercontent.com/cplieger/jsonx/badges/mutation.json)](https://github.com/cplieger/jsonx/issues?q=label%3Agremlins-tracker)
@@ -20,7 +20,7 @@ Standard library only (test dependency: pgregory.net/rapid).
 ## Install
 
 ```sh
-go get github.com/cplieger/jsonx@latest
+go get github.com/cplieger/jsonx/v2@latest
 ```
 
 ## Usage
@@ -71,7 +71,7 @@ f := jsonx.Classify(data)
 
 ## API
 
-One line per concern; symbol depth lives in the [Go Reference](https://pkg.go.dev/github.com/cplieger/jsonx).
+One line per concern; symbol depth lives in the [Go Reference](https://pkg.go.dev/github.com/cplieger/jsonx/v2).
 
 - **Policies:** `Policy`, `Disposition` (`Reject`/`Zero`/`Accept`), and the ready-made policies `TolerantZero()`, `Strict()`, `StrictAbsentZero()`. A policy is a plain struct value deciding each fact's outcome; the zero value rejects everything except the literal 0.
 - **Parsing:** `Classify(data) Facts` (total syntactic fact extraction, never panics), `ParseInt64(data, policy)`, the field types `TolerantInt` / `StrictInt` / `StrictAbsentZeroInt` (`json.Unmarshaler`, one per ready-made policy), and the typed rejection `*ParseError` carrying a `Reason` constant per gate.
