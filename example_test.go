@@ -4,7 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 
-	"github.com/cplieger/jsonx"
+	"github.com/cplieger/jsonx/v2"
 )
 
 // ExampleParseInt64 shows the same wire value under two policies: the

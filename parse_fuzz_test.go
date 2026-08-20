@@ -9,7 +9,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/cplieger/jsonx"
+	"github.com/cplieger/jsonx/v2"
 )
 
 // reporter is the failure-reporting surface shared by *testing.T and

@@ -1,4 +1,4 @@
-module github.com/cplieger/jsonx
+module github.com/cplieger/jsonx/v2
 
 go 1.27.0
 
