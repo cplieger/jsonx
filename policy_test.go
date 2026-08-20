@@ -30,8 +30,7 @@ func runPolicyTable(t *testing.T, p jsonx.Policy, cases []parseCase) {
 				if err == nil {
 					t.Fatalf("ParseInt64(%q) error = nil, want error", tc.in)
 				}
-				var perr *jsonx.ParseError
-				if !errors.As(err, &perr) {
+				if _, ok := errors.AsType[*jsonx.ParseError](err); !ok {
 					t.Fatalf("ParseInt64(%q) error = %T, want *jsonx.ParseError", tc.in, err)
 				}
 				return
@@ -276,8 +275,8 @@ func TestParseErrorTaxonomy(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 			_, err := jsonx.ParseInt64([]byte(tc.in), tc.p)
-			var perr *jsonx.ParseError
-			if !errors.As(err, &perr) {
+			perr, ok := errors.AsType[*jsonx.ParseError](err)
+			if !ok {
 				t.Fatalf("ParseInt64(%q) error = %v, want *jsonx.ParseError", tc.in, err)
 			}
 			if perr.Reason != tc.reason {
@@ -298,8 +297,8 @@ func TestParseErrorFractionalReason(t *testing.T) {
 	p := jsonx.TolerantZero()
 	p.Fractional = jsonx.Reject
 	_, err := jsonx.ParseInt64([]byte(`1.5`), p)
-	var perr *jsonx.ParseError
-	if !errors.As(err, &perr) || perr.Reason != jsonx.ReasonFractional {
+	perr, ok := errors.AsType[*jsonx.ParseError](err)
+	if !ok || perr.Reason != jsonx.ReasonFractional {
 		t.Fatalf("ParseInt64(1.5) error = %v, want ReasonFractional", err)
 	}
 	if !perr.Facts.Fractional || !perr.Facts.FloatForm {
@@ -313,8 +312,8 @@ func TestParseErrorSnippetBounded(t *testing.T) {
 	t.Parallel()
 	huge := `"` + strings.Repeat("x", 5000)
 	_, err := jsonx.ParseInt64([]byte(huge), jsonx.Strict())
-	var perr *jsonx.ParseError
-	if !errors.As(err, &perr) {
+	perr, ok := errors.AsType[*jsonx.ParseError](err)
+	if !ok {
 		t.Fatalf("error = %v, want *jsonx.ParseError", err)
 	}
 	if len(perr.Snippet) > 64 {
@@ -332,8 +331,8 @@ func TestParseErrorSnippetCapBoundary(t *testing.T) {
 	t.Parallel()
 	atCap := `"` + strings.Repeat("x", 39) // 40 bytes, unterminated string
 	_, err := jsonx.ParseInt64([]byte(atCap), jsonx.Strict())
-	var perr *jsonx.ParseError
-	if !errors.As(err, &perr) {
+	perr, ok := errors.AsType[*jsonx.ParseError](err)
+	if !ok {
 		t.Fatalf("error = %v, want *jsonx.ParseError", err)
 	}
 	if perr.Snippet != atCap {
@@ -341,7 +340,8 @@ func TestParseErrorSnippetCapBoundary(t *testing.T) {
 	}
 	overCap := atCap + "x"
 	_, err = jsonx.ParseInt64([]byte(overCap), jsonx.Strict())
-	if !errors.As(err, &perr) {
+	perr, ok = errors.AsType[*jsonx.ParseError](err)
+	if !ok {
 		t.Fatalf("error = %v, want *jsonx.ParseError", err)
 	}
 	if got, want := perr.Snippet, overCap[:40]+"..."; got != want {
