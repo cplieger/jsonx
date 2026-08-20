@@ -28,6 +28,32 @@ import (
 // The adversarial shape to watch is the exponent: `1e999999999` is a dozen bytes
 // that a naive parser turns into an enormous computation. classify_test.go
 // already pins that the WORK is bounded; this file pins the ALLOCATION.
+//
+// HOW THE MEASUREMENT IS TAKEN, AND WHY IT IS A MINIMUM
+// testing.AllocsPerRun returns a MEAN, and on Go 1.27 the mean is not stable for
+// any path that calls encoding/json: v1 is backed by encoding/json/v2, whose
+// coder state is pooled, and under -race the pool's hit/miss pattern varies
+// between processes. Measured on go1.27.0: json.Unmarshal into a string is a
+// flat 1 allocation over 12 trials without -race, and jitters to 2 in roughly 1
+// trial in 12 with it. A pool MISS can only add, never remove, so the minimum
+// over a few trials is the steady-state cost - which is the cost these tests are
+// about. Measured stable: 0 mismatches over 40 trials of min-over-3 under -race,
+// against a reproducible failure for the single measurement.
+//
+// This keeps the assertion EXACT (lo == hi) rather than granting it a tolerance,
+// which is the weaker fix a flake invites.
+
+// minAllocsPerRun is testing.AllocsPerRun's steady-state cost: the minimum over
+// trials measurements, which discards pooled-state misses (see the note above).
+func minAllocsPerRun(runs, trials int, f func()) float64 {
+	best := testing.AllocsPerRun(runs, f)
+	for range trials - 1 {
+		if got := testing.AllocsPerRun(runs, f); got < best {
+			best = got
+		}
+	}
+	return best
+}
 
 // TestClassifyCostIsSizeIndependent pins the classifier as O(1) in the payload.
 func TestClassifyCostIsSizeIndependent(t *testing.T) {
@@ -57,8 +83,8 @@ func TestClassifyCostIsSizeIndependent(t *testing.T) {
 	for _, s := range shapes {
 		t.Run(s.name, func(t *testing.T) {
 			smallInput, largeInput := s.build(small), s.build(large)
-			lo := testing.AllocsPerRun(20, func() { _ = Classify(smallInput) })
-			hi := testing.AllocsPerRun(20, func() { _ = Classify(largeInput) })
+			lo := minAllocsPerRun(20, 3, func() { _ = Classify(smallInput) })
+			hi := minAllocsPerRun(20, 3, func() { _ = Classify(largeInput) })
 			if lo != hi {
 				t.Errorf("Classify allocated %v at %d bytes but %v at %d bytes: a "+
 					"128x larger payload must not cost more", lo, small, hi, large)
@@ -89,8 +115,8 @@ func TestParseCostIsSizeIndependent(t *testing.T) {
 			t.Run(fmt.Sprintf("%s/%s", pName, s.name), func(t *testing.T) {
 				// Hoisted for the same reason as in the Classify test above.
 				smallInput, largeInput := s.build(small), s.build(large)
-				lo := testing.AllocsPerRun(20, func() { _, _ = ParseInt64(smallInput, p) })
-				hi := testing.AllocsPerRun(20, func() { _, _ = ParseInt64(largeInput, p) })
+				lo := minAllocsPerRun(20, 3, func() { _, _ = ParseInt64(smallInput, p) })
+				hi := minAllocsPerRun(20, 3, func() { _, _ = ParseInt64(largeInput, p) })
 				if lo != hi {
 					t.Errorf("ParseInt64 allocated %v at %d bytes but %v at %d bytes: "+
 						"parse cost must not grow with the attacker's payload",
