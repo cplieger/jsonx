@@ -449,8 +449,8 @@ func TestPreflightDepthMatchesUnmarshal(t *testing.T) {
 				t.Fatalf("json.Unmarshal(%d nested) = nil, want it rejected; the stdlib ceiling moved and MaxDepth = %d is stale",
 					bounded.MaxDepth+1, bounded.MaxDepth)
 			}
-			var syntaxErr *json.SyntaxError
-			if err := bounded.Preflight(bytes.NewReader(overDeep)); !errors.As(err, &syntaxErr) {
+			err := bounded.Preflight(bytes.NewReader(overDeep))
+			if _, ok := errors.AsType[*json.SyntaxError](err); !ok {
 				t.Errorf("Preflight(%d nested) = %v (%T), want encoding/json's *json.SyntaxError", bounded.MaxDepth+1, err, err)
 			}
 		})
