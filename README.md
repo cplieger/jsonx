@@ -56,7 +56,7 @@ p.Null = jsonx.Reject
 p.EmptyString = jsonx.Reject
 p.MinValue = 1
 
-// A tolerant decoder with a wider bound than the default MaxInt32.
+// A tolerant decoder with a wider bound than TolerantZero's MaxInt32.
 t := jsonx.TolerantZero()
 t.MaxValue = math.MaxInt64
 ```
@@ -73,10 +73,10 @@ f := jsonx.Classify(data)
 
 One line per concern; symbol depth lives in the [Go Reference](https://pkg.go.dev/github.com/cplieger/jsonx).
 
-- **Policies:** `Policy`, `Disposition` (`Reject`/`Zero`/`Accept`), and the presets `TolerantZero()`, `Strict()`, `StrictAbsentZero()`. A policy is a plain struct value deciding each fact's outcome; the zero value rejects everything except the literal 0.
-- **Parsing:** `Classify(data) Facts` (total syntactic fact extraction, never panics), `ParseInt64(data, policy)`, the field types `TolerantInt` / `StrictInt` / `StrictAbsentZeroInt` (`json.Unmarshaler`, one per preset), and the typed rejection `*ParseError` carrying a `Reason` constant per gate.
+- **Policies:** `Policy`, `Disposition` (`Reject`/`Zero`/`Accept`), and the ready-made policies `TolerantZero()`, `Strict()`, `StrictAbsentZero()`. A policy is a plain struct value deciding each fact's outcome; the zero value rejects everything except the literal 0.
+- **Parsing:** `Classify(data) Facts` (total syntactic fact extraction, never panics), `ParseInt64(data, policy)`, the field types `TolerantInt` / `StrictInt` / `StrictAbsentZeroInt` (`json.Unmarshaler`, one per ready-made policy), and the typed rejection `*ParseError` carrying a `Reason` constant per gate.
 
-Bounding what an untrusted decode COSTS is a separate library: [`jsoncap`](https://github.com/cplieger/jsoncap) walks the token stream and enforces cardinality caps before allocation. It used to live here as `jsonx/bounded` and shares no code with this package.
+Bounding what an untrusted decode COSTS is a separate library: [`jsoncap`](https://github.com/cplieger/jsoncap) walks the token stream and enforces cardinality caps before allocation. It used to live here as `jsonx/bounded`.
 
 ## The three policies
 
@@ -115,7 +115,7 @@ Other stances compose the same way: a fully lenient decoder (any error → 0) is
 
 `Disposition` is fail-closed: its zero value is `Reject`, and `Accept` is meaningful only where a usable integer exists (`PaddedString`, `FloatForm`); on any other gate it is treated as `Reject`, never as silent acceptance. There is deliberately no truncation path: `Fractional` can only zero or reject. A zero-value `Policy` rejects everything except the literal 0.
 
-Rejections are typed: match with `errors.As` against `*jsonx.ParseError`, which carries the `Reason` (which gate fired), the full `Facts`, and a bounded snippet of the offending bytes.
+Rejections are typed: match `*jsonx.ParseError` with `errors.AsType`. It carries the `Reason` (which gate fired), the full `Facts`, and a bounded snippet of the offending bytes.
 
 ## Accepted number grammar
 
