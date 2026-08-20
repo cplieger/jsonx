@@ -41,13 +41,14 @@
 //
 // Preflight is the other half of the same concern: where the Decoder bounds
 // what a schema decode ALLOCATES, Preflight is a standalone pass that rejects
-// a body whose STRUCTURE is ambiguous or unbounded before any decode runs — a
-// repeated object key (which json.Unmarshal resolves to the last occurrence,
-// destroying the evidence that it happened) and nesting past MaxDepth (which
-// json.Decoder.Token does not bound on its own). It is the fail-closed
-// counterpart to Object and Array, which deliberately REPRODUCE Unmarshal's
-// duplicate-key merge: a schema decoder must match the stdlib, while a caller
-// that cannot tolerate the ambiguity rejects the body outright.
+// a body whose STRUCTURE is ambiguous before any decode runs — a repeated
+// object key, which json.Unmarshal resolves to the last occurrence, destroying
+// the evidence that it happened. It is the fail-closed counterpart to Object
+// and Array, which deliberately REPRODUCE Unmarshal's duplicate-key merge: a
+// schema decoder must match the stdlib, while a caller that cannot tolerate
+// the ambiguity rejects the body outright. Nesting depth needs no pass of its
+// own — encoding/json bounds it at MaxDepth for every walk here, Preflight
+// included.
 package bounded
 
 import (
@@ -79,55 +80,46 @@ var (
 	// (matched case-insensitively). The wrapping error carries a bounded,
 	// quoted snippet of the offending key.
 	ErrDuplicateKey = errors.New("jsonx/bounded: duplicate object key")
-	// ErrMaxDepth reports that Preflight found more than MaxDepth nested
-	// containers open at once. WARNING: Preflight stops returning this
-	// sentinel on Go 1.27 — see MaxDepth's doc for why and what to change.
-	ErrMaxDepth = errors.New("jsonx/bounded: maximum nesting depth exceeded")
 )
 
-// MaxDepth is the nesting ceiling Preflight enforces: at most MaxDepth
-// containers open at once. It mirrors encoding/json's own scanner limit, so a
-// body Preflight rejects for depth is one the decode step would have rejected
-// anyway - only rejected before a token walk has built the stack to find out.
-// The explicit ceiling is necessary because json.Decoder.Token does NOT apply
-// that limit itself: a token walk over a 1 MiB body of '[' otherwise recurses
-// once per byte (~1M frames, measured at 206 MB RSS inside a 256 MiB
-// container).
+// MaxDepth is the nesting ceiling every walk in this package observes: at most
+// MaxDepth containers open at once. encoding/json enforces it, not this
+// package - the constant exists because the stdlib does not export the value,
+// so without it a caller has no name for the threshold and no way to write the
+// boundary body a test needs.
 //
-// Verified on Go 1.26.5: encoding/json's scanner.go sets maxNestingDepth =
-// 10000, json.Unmarshal accepts 10000 and rejects 10001, Decoder.Token accepts
-// 10010 without complaint, and the guard in preflightValue rejects at 10001 —
-// so Preflight's boundary is exactly Unmarshal's, which is what the paragraph
-// above claims.
+// Since Go 1.27 encoding/json is backed by encoding/json/v2, whose jsontext
+// Decoder refuses to read the token that would open container MaxDepth+1. That
+// refusal reaches every entry point here, because every one of them reads
+// tokens: Preflight, Skip, Object, Array, Map, Decode and a hand-rolled
+// Open/More/Close loop are all bounded by it. It arrives as encoding/json's own
+// *json.SyntaxError; this package does not translate it, because there is
+// nothing stable to translate it to (jsontext keeps its depth error unexported
+// and its exported SyntacticError documents its contents as subject to change,
+// so the only hook is the message text - and classifying an error by its text
+// is exactly what a sentinel exists to avoid).
 //
-// WARNING: both claims above go false on Go 1.27, and Preflight's ERROR
-// IDENTITY changes with them. The v2-backed encoding/json decodes through
-// encoding/json/jsontext, whose Decoder enforces its OWN 10000-container limit
-// during Token — the exact thing this ceiling exists to compensate for. Because
-// the guard here fires on the token that OPENS level 10001, and jsontext
-// refuses to READ that token, jsontext's error always arrives first and this
-// guard becomes unreachable:
+// Measured on Go 1.27.0, for both nested arrays and nested objects: Preflight
+// and json.Unmarshal accept MaxDepth and reject MaxDepth+1 with the identical
+// *json.SyntaxError. So Preflight's depth acceptance set is EXACTLY
+// json.Unmarshal's, which is the parity Preflight promises, and it can never
+// admit a body the decode step would reject on depth. That parity is pinned by
+// TestPreflightDepthMatchesUnmarshal, which asserts both boundary levels
+// against json.Unmarshal itself rather than against this constant - so if a
+// future toolchain moves the stdlib's ceiling, the test fails instead of the
+// constant silently drifting.
 //
-//	Go 1.26:  Token() over 10010 '[' -> 10010 tokens, then io.EOF
-//	          Preflight -> ErrMaxDepth
-//	Go 1.27:  Token() over 10010 '[' -> 10000 tokens, then "exceeded max depth"
-//	          Preflight -> that error, NOT ErrMaxDepth
-//
-// The acceptance set does not change (over-deep input is still rejected), so
-// this is not a safety regression — but errors.Is(err, ErrMaxDepth) stops
-// matching, which is a public contract break for every Preflight consumer
-// (seadex-scout, docker-fclones-scheduler, vibekit).
-//
-// No fix is applied here because every shape of one is wrong on Go 1.26:
-// lowering the ceiling so this guard wins would reject depth-10000 bodies that
-// json.Unmarshal accepts on this toolchain, diverging from the stdlib alignment
-// the paragraph above promises, and translating jsontext's error has no stable
-// hook (jsontext exports ErrDuplicateName and ErrNonStringName but no depth
-// sentinel, and SyntacticError documents its contents as subject to change).
-// When the toolchain moves: lower MaxDepth to 9999 so this guard fires first,
-// correct the two paragraphs above, and pin the new boundary with a test that
-// actually exercises it. See .kiro/steering/go-stdlib-changelog.md, "Preparing
-// for Go 1.27 in this fleet".
+// Historical note, because it explains a mechanism that is no longer here: on
+// Go 1.26 and earlier json.Decoder.Token applied NO depth limit, so a token
+// walk over a 1 MiB body of '[' recursed once per byte (~1M frames, measured at
+// 206 MB RSS inside a 256 MiB container). Preflight carried its own explicit
+// depth check to compensate, returning a local sentinel. Go 1.27 provides that
+// bound itself, at this exact threshold, so the check was deleted rather than
+// re-tuned: keeping it meant either duplicating a stdlib guarantee or - by
+// lowering the ceiling so the local check could still fire first - rejecting
+// depth-MaxDepth bodies that json.Unmarshal accepts, which would have traded a
+// true parity claim for a preserved error name. Measured with the check gone: a
+// 1 MiB all-opens body is still refused, and stack use stays flat at 2688 KiB.
 const MaxDepth = 10000
 
 // maxKeySnippet bounds the untrusted key text a duplicate-key error renders,
@@ -438,9 +430,9 @@ func Map[V any](d *Decoder, prior map[string]V, maxEntries int, what string, dec
 	return m, d.Close()
 }
 
-// Preflight walks one complete JSON value from r and rejects the two
-// structural defects json.Unmarshal silently tolerates. It decodes nothing
-// into a caller value.
+// Preflight walks one complete JSON value from r and rejects the structural
+// defect json.Unmarshal silently tolerates. It decodes nothing into a caller
+// value.
 //
 // Duplicate object keys: encoding/json accepts a repeated key and applies the
 // LAST occurrence to the struct field, discarding the earlier value unseen. A
@@ -455,22 +447,23 @@ func Map[V any](d *Decoder, prior map[string]V, maxEntries int, what string, dec
 // exactly like the stdlib, while a caller that cannot tolerate the ambiguity
 // at all rejects the body before decoding it.
 //
-// Nesting depth: bounded at MaxDepth (see that constant for why the token
-// stream needs its own ceiling). Over-deep input fails with ErrMaxDepth.
+// Nesting depth is bounded but not by this pass: encoding/json refuses the
+// token that would open container MaxDepth+1, so an over-deep body fails with
+// its *json.SyntaxError and Preflight's depth acceptance set is exactly
+// json.Unmarshal's. See MaxDepth.
 //
 // It is a PREFLIGHT, not a decode: run it over the whole body, then hand the
 // same bytes to json.Unmarshal or a Decoder schema walk. It reads r to
 // completion and rejects trailing data after the top-level value (End's
 // whole-input strictness), so it never accepts a body the decode step would
 // reject. Content policy stays the caller's: Preflight takes no view of which
-// keys or values are acceptable, only of whether the structure is unambiguous
-// and bounded. Invalid UTF-8 is likewise not its concern - json.Unmarshal
-// replaces malformed bytes inside strings with U+FFFD rather than failing, and
-// whether that is acceptable depends on what the caller does with the decoded
-// text.
+// keys or values are acceptable, only of whether the structure is unambiguous.
+// Invalid UTF-8 is likewise not its concern - json.Unmarshal replaces
+// malformed bytes inside strings with U+FFFD rather than failing, and whether
+// that is acceptable depends on what the caller does with the decoded text.
 func Preflight(r io.Reader) error {
 	d := NewDecoder(r, 0)
-	if err := d.preflightValue(0); err != nil {
+	if err := d.preflightValue(); err != nil {
 		return err
 	}
 	return d.End()
@@ -478,9 +471,11 @@ func Preflight(r io.Reader) error {
 
 // preflightValue consumes exactly one JSON value, recursing into objects and
 // arrays. A scalar is consumed by the leading Token call; a container is
-// closed by the trailing one. Depth is checked BEFORE recursing, so the frame
-// count is bounded by MaxDepth by construction.
-func (d *Decoder) preflightValue(depth int) error {
+// closed by the trailing one. The recursion is bounded by MaxDepth without a
+// check here: encoding/json refuses to read the token that opens container
+// MaxDepth+1, so the Token call below fails before the frame that would
+// exceed it is entered.
+func (d *Decoder) preflightValue() error {
 	t, err := d.dec.Token()
 	if err != nil {
 		return err
@@ -489,26 +484,22 @@ func (d *Decoder) preflightValue(depth int) error {
 	if !isDelim {
 		return nil
 	}
-	if depth >= MaxDepth {
-		return fmt.Errorf("%w: %d", ErrMaxDepth, MaxDepth)
-	}
-	if err := d.preflightContainer(delim, depth); err != nil {
+	if err := d.preflightContainer(delim); err != nil {
 		return err
 	}
 	return d.Close()
 }
 
 // preflightContainer traverses the members of a container whose opening
-// delimiter preflightValue has read and whose depth it has validated. The
-// closing delimiter stays preflightValue's, so container framing has one
-// owner.
-func (d *Decoder) preflightContainer(delim json.Delim, depth int) error {
+// delimiter preflightValue has read. The closing delimiter stays
+// preflightValue's, so container framing has one owner.
+func (d *Decoder) preflightContainer(delim json.Delim) error {
 	switch delim {
 	case '{':
-		return d.preflightObject(depth + 1)
+		return d.preflightObject()
 	case '[':
 		for d.dec.More() {
-			if err := d.preflightValue(depth + 1); err != nil {
+			if err := d.preflightValue(); err != nil {
 				return err
 			}
 		}
@@ -522,7 +513,7 @@ func (d *Decoder) preflightContainer(delim json.Delim, depth int) error {
 // failing on the first repeated key. Keys are held in a fold-canonicalized
 // set, so a key-dense object costs O(keys) rather than the O(keys^2) an
 // EqualFold scan over the accumulated keys would.
-func (d *Decoder) preflightObject(depth int) error {
+func (d *Decoder) preflightObject() error {
 	seen := make(map[string]struct{})
 	for d.dec.More() {
 		key, err := d.Key()
@@ -534,7 +525,7 @@ func (d *Decoder) preflightObject(depth int) error {
 			return fmt.Errorf("%w: %q", ErrDuplicateKey, keySnippet(key))
 		}
 		seen[folded] = struct{}{}
-		if err := d.preflightValue(depth); err != nil {
+		if err := d.preflightValue(); err != nil {
 			return err
 		}
 	}

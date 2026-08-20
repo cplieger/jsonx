@@ -70,6 +70,18 @@ func FuzzPreflight(f *testing.F) {
 	f.Add([]byte(`{} {}`))
 	f.Add([]byte(`null`))
 	f.Add([]byte(``))
+	// The three simple-fold orbits Unicode 17 changed where BOTH members were
+	// already assigned in Unicode 15, so real upstream text can carry them.
+	// foldKey walks SimpleFold, so these are the only inputs whose duplicate
+	// verdict the toolchain's Unicode bump can move, and the committed corpus
+	// does not otherwise reach them.
+	f.Add([]byte("{\"\u0390\":1,\"\u1fd3\":2}"))
+	f.Add([]byte("{\"\u03b0\":1,\"\u1fe3\":2}"))
+	f.Add([]byte("{\"\ufb05\":1,\"\ufb06\":2}"))
+	// The two runes that lower to ASCII, which is the other way a fold orbit
+	// can reach a key an ASCII-only canonicalizer would miss.
+	f.Add([]byte("{\"\u0130\":1,\"i\":2}"))
+	f.Add([]byte("{\"\u212a\":1,\"k\":2}"))
 
 	f.Fuzz(func(t *testing.T, data []byte) {
 		err := bounded.Preflight(bytes.NewReader(data))

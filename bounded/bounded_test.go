@@ -365,7 +365,16 @@ func TestPreflightKeyFoldMatchesEqualFold(t *testing.T) {
 		{"\u017f", "S"}, // LATIN SMALL LETTER LONG S folds to 's'
 		{"\u0131", "I"}, // DOTLESS I does NOT fold to ASCII 'i'
 		{"\u212a", "K"}, // KELVIN SIGN folds to 'k'
+		{"\u0130", "i"}, // LATIN CAPITAL I WITH DOT ABOVE does NOT fold to 'i'
 		{"\u00e9", "\u00c9"},
+		// The three orbits Unicode 17 changed where both members were already
+		// assigned in Unicode 15, so real upstream text can carry them. They
+		// are the only keys whose verdict here the toolchain's Unicode table
+		// can move, and encoding/json's v1 field matching moves with them, so
+		// they are exactly the pairs whose alignment must hold.
+		{"\u0390", "\u1fd3"},
+		{"\u03b0", "\u1fe3"},
+		{"\ufb05", "\ufb06"},
 		{"a", "b"},
 		{"", "x"},
 	}
@@ -390,27 +399,74 @@ func TestPreflightKeyFoldMatchesEqualFold(t *testing.T) {
 	}
 }
 
-// TestPreflightRejectsOverDepth pins the ceiling json.Decoder.Token does not
-// apply itself: the all-opens body is rejected by the depth bound rather than
-// by running one stack frame per byte to find out it is truncated.
+// TestPreflightDepthMatchesUnmarshal pins the depth contract Preflight
+// promises: its acceptance set is exactly json.Unmarshal's, so the preflight
+// can never admit a body the decode step would reject on depth, nor reject one
+// it would accept.
 //
-// EXPECTED TO FAIL ON GO 1.27, and that is the tripwire working. jsontext's
-// Decoder enforces its own 10000-container limit during Token and reports it
-// first, so Preflight returns that error instead of ErrMaxDepth. Do NOT relax
-// this assertion to make the build pass: the failure means the sentinel every
-// consumer matches with errors.Is is no longer returned. The remedy is in
-// MaxDepth's doc (lower the ceiling to 9999 so this guard fires first).
-func TestPreflightRejectsOverDepth(t *testing.T) {
+// The ceiling is encoding/json's, not this package's. Since Go 1.27 the v1 API
+// is backed by encoding/json/v2, whose jsontext Decoder refuses to read the
+// token that would open container MaxDepth+1, and that refusal reaches every
+// token-reading entry point here. Both boundary levels are asserted, and
+// asserted against json.Unmarshal rather than against MaxDepth, so a future
+// toolchain that moves the stdlib ceiling fails this test instead of leaving
+// the constant to drift silently.
+//
+// The error TEXT is deliberately not pinned: jsontext keeps its depth error
+// unexported and documents SyntacticError's contents as subject to change, so
+// the type is the strongest stable assertion available.
+func TestPreflightDepthMatchesUnmarshal(t *testing.T) {
 	t.Parallel()
-	deep := strings.Repeat("[", bounded.MaxDepth+10)
-	if err := bounded.Preflight(strings.NewReader(deep)); !errors.Is(err, bounded.ErrMaxDepth) {
-		t.Errorf("Preflight(%d open brackets) = %v, want ErrMaxDepth", bounded.MaxDepth+10, err)
+	shapes := map[string]struct {
+		nest, unnest, leaf string
+	}{
+		"arrays":  {nest: "[", unnest: "]"},
+		"objects": {nest: `{"a":`, unnest: "}", leaf: "1"},
 	}
-	// One container short of the ceiling is a depth question only: the body is
-	// truncated, so it still fails - but NOT with ErrMaxDepth.
-	shallow := strings.Repeat("[", bounded.MaxDepth-1)
-	if err := bounded.Preflight(strings.NewReader(shallow)); errors.Is(err, bounded.ErrMaxDepth) {
-		t.Errorf("Preflight(%d open brackets) = ErrMaxDepth, want the depth bound not to fire", bounded.MaxDepth-1)
+	for name, shape := range shapes {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			body := func(n int) []byte {
+				return []byte(strings.Repeat(shape.nest, n) + shape.leaf + strings.Repeat(shape.unnest, n))
+			}
+
+			// At the ceiling both accept, so the preflight adds no depth
+			// strictness of its own.
+			atCeiling := body(bounded.MaxDepth)
+			var sink any
+			if err := json.Unmarshal(atCeiling, &sink); err != nil {
+				t.Fatalf("json.Unmarshal(%d nested) = %v, want it accepted; the stdlib ceiling moved and MaxDepth = %d is stale",
+					bounded.MaxDepth, err, bounded.MaxDepth)
+			}
+			if err := bounded.Preflight(bytes.NewReader(atCeiling)); err != nil {
+				t.Errorf("Preflight(%d nested) = %v, want it accepted (json.Unmarshal accepts it)", bounded.MaxDepth, err)
+			}
+
+			// One level over, both reject, and Preflight surfaces the
+			// tokenizer's own error rather than translating it.
+			overDeep := body(bounded.MaxDepth + 1)
+			if err := json.Unmarshal(overDeep, &sink); err == nil {
+				t.Fatalf("json.Unmarshal(%d nested) = nil, want it rejected; the stdlib ceiling moved and MaxDepth = %d is stale",
+					bounded.MaxDepth+1, bounded.MaxDepth)
+			}
+			var syntaxErr *json.SyntaxError
+			if err := bounded.Preflight(bytes.NewReader(overDeep)); !errors.As(err, &syntaxErr) {
+				t.Errorf("Preflight(%d nested) = %v (%T), want encoding/json's *json.SyntaxError", bounded.MaxDepth+1, err, err)
+			}
+		})
+	}
+}
+
+// TestPreflightBoundsAllOpensBody pins the hostile shape the package was built
+// for: 1 MiB of nothing but '['. It must be refused by the nesting ceiling after
+// MaxDepth frames rather than by recursing once per byte to discover the body is
+// truncated, so the cost is bounded by the ceiling and not by the input length.
+// Before Go 1.27 this needed an explicit depth check in preflightValue; the
+// stdlib now provides the bound, and this test is what holds it.
+func TestPreflightBoundsAllOpensBody(t *testing.T) {
+	t.Parallel()
+	if err := bounded.Preflight(strings.NewReader(strings.Repeat("[", 1<<20))); err == nil {
+		t.Error("Preflight(1 MiB of open brackets) = nil, want it rejected")
 	}
 }
 
