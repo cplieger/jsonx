@@ -7,7 +7,7 @@
 [![OpenSSF Best Practices](https://www.bestpractices.dev/projects/13649/badge)](https://www.bestpractices.dev/projects/13649)
 [![OpenSSF Scorecard](https://api.scorecard.dev/projects/github.com/cplieger/jsonx/badge)](https://scorecard.dev/viewer/?uri=github.com/cplieger/jsonx)
 
-> Defensive decoding of untrusted upstream JSON: number-or-string integer fields under an explicit, pluggable tolerance policy, plus bounded token-level decoding with `json.Unmarshal` parity (`jsonx/bounded`)
+> Defensive decoding of untrusted upstream JSON: number-or-string integer fields under an explicit, pluggable tolerance policy
 
 A standalone Go library for the JSON shape variance every scraper-adjacent app eventually meets: the same numeric field arrives as `14` on one endpoint and `"14"` on another, and odd rows carry `null`, `""`, `"unknown"`, floats, negatives, or absurdly large values. jsonx decodes all of them under one hardened core:
 
@@ -69,69 +69,14 @@ f := jsonx.Classify(data)
 // f.Negative, f.Overflow, f.Padded
 ```
 
-### Bounded token decoding (`jsonx/bounded`)
-
-The `jsonx/bounded` subpackage is a token-level decoder toolkit for schema decoders that must bound decode amplification. `json.Unmarshal` materializes the entire value before any caller-side count check can run, so compact serialized elements amplify a wire-capped body into structs and slice backing far beyond the byte cap. A `bounded.Decoder` walks the token stream and rejects hostile cardinality BEFORE each element is allocated: a per-container cap (`ErrArrayCap`, `ErrMapCap`) and one aggregate element budget shared by every array element and map entry (`ErrElementBudget`), all matched with `errors.Is`.
-
-The building blocks reproduce `encoding/json`'s observable semantics exactly, so a schema decoder built from them is a drop-in for `json.Unmarshal` on well-formed input:
-
-- Null-into-object is a no-op; null-into-array yields nil; null-into-map yields nil too (a map follows the slice, not the struct).
-- Duplicate object keys merge field-wise; duplicate arrays re-expose retained backing, truncate, and replace-on-empty (`Array`'s `prior` argument owns that lifecycle); a duplicate MAP key replaces with a fresh zero value instead of merging, exactly as `json.Unmarshal` does for maps.
-- Unknown fields are token-skipped without materializing; scalars decode via `json.Decoder.Decode`.
-- Dispatch keys with `strings.EqualFold` for Unmarshal's case-insensitive field matching.
-- The underlying decoder runs with `UseNumber`, so skipping an unknown field never rejects extreme-but-valid numbers (`1e1000`) through float64 conversion.
-
-```go
-d := bounded.NewDecoder(bytes.NewReader(body), maxPageElements)
-var page pbList
-err := d.Object(func(k string) error {
-	switch {
-	case strings.EqualFold(k, "items"):
-		var err error
-		page.Items, err = bounded.Array(d, page.Items, perPage, "page items",
-			func(e *pbEntry) error { return decodeEntry(d, e) })
-		return err
-	case strings.EqualFold(k, "labels"):
-		var err error
-		page.Labels, err = bounded.Map(d, page.Labels, perPage, "page labels",
-			func(_ string, v *string) error { return d.Decode(v) })
-		return err
-	case strings.EqualFold(k, "totalItems"):
-		return d.Decode(&page.TotalItems)
-	default:
-		return d.Skip()
-	}
-})
-if err == nil {
-	err = d.End() // reject trailing data, matching json.Unmarshal strictness
-}
-```
-
-`Array` and `Map` are twins on purpose, and both charge the ONE aggregate budget: a body cannot be amplified by splitting hostile cardinality across container kinds, which is exactly what happens when a caller hand-walks its maps and counts them itself. The check ORDER — per-container cap, then aggregate charge, then read the entry (a map key is itself an unbounded allocation from the wire) — is the invariant the toolkit owns, and the reason it is a walk rather than an exported counter. A caller whose policy genuinely does not fit either walk keeps the token primitives and its own accounting.
-
-The schema decode functions stay app code; the toolkit owns only the walk scaffold. The walk is never looser than `json.Unmarshal`.
-
-`bounded.Preflight` covers the other half of the same concern. Where the `Decoder` bounds what a schema decode ALLOCATES, `Preflight` is a standalone pass that rejects a body whose STRUCTURE is ambiguous before any decode runs:
-
-```go
-if err := bounded.Preflight(bytes.NewReader(body)); err != nil {
-	return err // ErrDuplicateKey, or the tokenizer's own error
-}
-// same bytes now safe to hand to json.Unmarshal or a Decoder walk
-```
-
-- **Duplicate object keys** (`ErrDuplicateKey`): `encoding/json` accepts a repeated key and applies the LAST occurrence, discarding the earlier value unseen — so a body carrying a real value and then a `null` for the same key decodes as the `null`, and nothing downstream can tell it happened. Matching is case-insensitive, because `encoding/json` matches struct fields case-insensitively too: `"media"` and `"Media"` address one field and are equally ambiguous.
-- **Nesting depth**: bounded, but by `encoding/json` rather than by this package. Since Go 1.27 the v1 API is backed by `encoding/json/v2`, whose tokenizer refuses to read the token that would open container `MaxDepth`+1, and that refusal reaches every walk here. So an over-deep body fails with `encoding/json`'s own `*json.SyntaxError`, and `Preflight`'s depth acceptance set is exactly `json.Unmarshal`'s — it can neither admit a body the decode step would reject on depth nor reject one it would accept. `MaxDepth` exists only because the stdlib does not export the value; a test asserts both boundary levels against `json.Unmarshal` itself, so the constant cannot drift silently.
-
-It is deliberately the opposite fail direction from `Object` and `Array`, which reproduce Unmarshal's duplicate-key merge: a schema decoder must behave exactly like the stdlib, while a caller that cannot tolerate the ambiguity at all rejects the body before decoding it. Content policy stays the caller's — `Preflight` takes no view of which keys or values are acceptable, and invalid UTF-8 is likewise not its concern.
-
 ## API
 
 One line per concern; symbol depth lives in the [Go Reference](https://pkg.go.dev/github.com/cplieger/jsonx).
 
 - **Policies:** `Policy`, `Disposition` (`Reject`/`Zero`/`Accept`), and the presets `TolerantZero()`, `Strict()`, `StrictAbsentZero()`. A policy is a plain struct value deciding each fact's outcome; the zero value rejects everything except the literal 0.
 - **Parsing:** `Classify(data) Facts` (total syntactic fact extraction, never panics), `ParseInt64(data, policy)`, the field types `TolerantInt` / `StrictInt` / `StrictAbsentZeroInt` (`json.Unmarshaler`, one per preset), and the typed rejection `*ParseError` carrying a `Reason` constant per gate.
-- **`jsonx/bounded`:** `NewDecoder(r, elementBudget)`, `Object`, generic `Array[T]` and `Map[V]` (slice and map twins, charging one shared aggregate), token primitives `Open`/`Close`/`Key`/`Skip`/`Decode`/`More`, `End` (trailing-data strictness), `Elements` (carry one budget across paginated bodies), sentinels `ErrElementBudget`/`ErrArrayCap`/`ErrMapCap`. Token-level decoding that rejects hostile cardinality before each element is allocated. Plus `Preflight(r)` with `ErrDuplicateKey` and `MaxDepth`: the standalone structural gate that rejects an ambiguous body ahead of any decode.
+
+Bounding what an untrusted decode COSTS is a separate library: [`jsoncap`](https://github.com/cplieger/jsoncap) walks the token stream and enforces cardinality caps before allocation. It used to live here as `jsonx/bounded` and shares no code with this package.
 
 ## The three policies
 
