@@ -44,11 +44,21 @@ func TestClassifyCostIsSizeIndependent(t *testing.T) {
 	}
 	// Both sizes sit well past any short-input fast path, so a difference here is
 	// growth with input rather than a change of code path.
+	//
+	// The fixture is built OUTSIDE the measured closure. Building it inside
+	// measures the test's own string construction alongside the subject, and
+	// that confounder is not benign: under -race the larger fixture costs one
+	// allocation more than the smaller, so the sum moves for a reason that has
+	// nothing to do with Classify. It went unnoticed while both sides happened
+	// to land on the same total and surfaced on Go 1.27, where v1's
+	// Unmarshal-into-string dropped from 2 allocations to 1 and only the small
+	// side got cheaper.
 	const small, large = 512, 65536
 	for _, s := range shapes {
 		t.Run(s.name, func(t *testing.T) {
-			lo := testing.AllocsPerRun(20, func() { _ = Classify(s.build(small)) })
-			hi := testing.AllocsPerRun(20, func() { _ = Classify(s.build(large)) })
+			smallInput, largeInput := s.build(small), s.build(large)
+			lo := testing.AllocsPerRun(20, func() { _ = Classify(smallInput) })
+			hi := testing.AllocsPerRun(20, func() { _ = Classify(largeInput) })
 			if lo != hi {
 				t.Errorf("Classify allocated %v at %d bytes but %v at %d bytes: a "+
 					"128x larger payload must not cost more", lo, small, hi, large)
@@ -77,8 +87,10 @@ func TestParseCostIsSizeIndependent(t *testing.T) {
 	for pName, p := range policies {
 		for _, s := range shapes {
 			t.Run(fmt.Sprintf("%s/%s", pName, s.name), func(t *testing.T) {
-				lo := testing.AllocsPerRun(20, func() { _, _ = ParseInt64(s.build(small), p) })
-				hi := testing.AllocsPerRun(20, func() { _, _ = ParseInt64(s.build(large), p) })
+				// Hoisted for the same reason as in the Classify test above.
+				smallInput, largeInput := s.build(small), s.build(large)
+				lo := testing.AllocsPerRun(20, func() { _, _ = ParseInt64(smallInput, p) })
+				hi := testing.AllocsPerRun(20, func() { _, _ = ParseInt64(largeInput, p) })
 				if lo != hi {
 					t.Errorf("ParseInt64 allocated %v at %d bytes but %v at %d bytes: "+
 						"parse cost must not grow with the attacker's payload",
