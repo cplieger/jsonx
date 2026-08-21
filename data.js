@@ -1,6 +1,6 @@
 window.BENCHMARK_DATA = {
   "lastUpdate": 1787316426975,
-  "repoUrl": "https://github.com/cplieger/ci",
+  "repoUrl": "https://github.com/cplieger/jsonx",
   "entries": {
     "Benchmark": [
       {
@@ -806,19 +806,19 @@ window.BENCHMARK_DATA = {
       {
         "commit": {
           "author": {
-            "name": "cplieger",
-            "username": "cplieger",
-            "email": "917744+cplieger@users.noreply.github.com"
-          },
-          "committer": {
             "name": "Christopher Plieger",
             "username": "cplieger",
             "email": "917744+cplieger@users.noreply.github.com"
           },
-          "id": "a913658336765dccfffa3e1978b47a61cb869534",
-          "message": "fix: attribute benchmark data to the commit that was benchmarked\n\nThe benchmark action stamps every data point with a cplieger/ci commit, because it resolves the repo it acts on from github.context.repo and this workflow runs in ci while measuring a consumer. A chart whose points link to ci cannot attribute a regression to the change that caused it, which is the only reason the tracker exists.\n\nRepairs the record after publishing instead of trying to redirect the action. Overriding GITHUB_REPOSITORY was tried first and cannot work, because GitHub reserves the default GITHUB_* variables and the runner value wins at process level. bench-fix-attribution.py rewrites the entry the run just appended, taking real commit metadata from the consumer own API response and mirroring the shape the action builds itself, and it also corrects the chart repoUrl.\n\nIt refuses to write unless the file is exactly the action format and the newest entry carries this run ci SHA, so a future format change fails the leg loudly rather than corrupting the series. Its round-trip is byte-identical against all four published files, so a run that changes nothing produces no commit.\n\nAlert comments are turned off and the job summary turned on. That target is resolved from context at API-call time, so unlike the data point it cannot be repaired afterwards, and a comment about a consumer regression would be filed on a cplieger/ci commit where it is both misfiled and unread.",
-          "timestamp": "2026-08-21T12:40:16Z",
-          "url": "https://github.com/cplieger/ci/commit/a913658336765dccfffa3e1978b47a61cb869534"
+          "committer": {
+            "name": "GitHub",
+            "username": "web-flow",
+            "email": "noreply@github.com"
+          },
+          "id": "66c5e020d96caa625284d59e7cab943d689cfb32",
+          "message": "chore(sync): synced file(s) with cplieger/ci (#117)\n\nCo-authored-by: github-actions[bot] <41898282+github-actions[bot]@users.noreply.github.com>",
+          "timestamp": "2026-08-21T12:10:36Z",
+          "url": "https://github.com/cplieger/jsonx/commit/66c5e020d96caa625284d59e7cab943d689cfb32"
         },
         "date": 1787316426234,
         "tool": "customSmallerIsBetter",
