@@ -46,3 +46,19 @@ func ExamplePolicy() {
 	fmt.Println(err)
 	// Output: jsonx: out of range: "0"
 }
+
+// ExampleClassify shows the escape hatch: a caller that needs a fact no
+// Policy can report - which wire form the value arrived in - reads it off
+// Facts. ParseInt64 returns the integer and nothing about the shape it
+// came from.
+func ExampleClassify() {
+	for _, data := range [][]byte{[]byte(`14`), []byte(`"14"`), []byte(`"unknown"`)} {
+		f := jsonx.Classify(data)
+		numeric := f.Shape == jsonx.Number || f.Shape == jsonx.NumericString
+		fmt.Printf("%-10s quoted=%-5v numeric=%-5v value=%d\n", data, f.WasString(), numeric, f.Value)
+	}
+	// Output:
+	// 14         quoted=false numeric=true  value=14
+	// "14"       quoted=true  numeric=true  value=14
+	// "unknown"  quoted=true  numeric=false value=0
+}
