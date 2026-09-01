@@ -8,43 +8,24 @@ import (
 
 // jsonx sells a bound on what untrusted input can cost: Classify is a total
 // inspection over raw bytes and ParseInt64 must not be made expensive by a
-// hostile number. Until this landed nothing measured the cost half of that
-// contract.
+// hostile number. These tests pin the cost half of that contract.
 //
-// WHAT THESE TESTS ASSERT, AND WHY IT IS NOT "ZERO ALLOCATIONS"
-// Writing these found the real shape of the guarantee. Allocation counts are not
-// uniformly zero: a float form costs 1, and a rejected oversized value costs a
-// few more because building a *ParseError boxes a struct and copies a snippet.
-// Those are all O(1) per value and entirely fine.
+// Allocation counts are not uniformly zero (a float form costs 1, a
+// rejected oversized value costs a few more for the *ParseError), and
+// that is fine: the property that matters for a defensive decoder is
+// SIZE INDEPENDENCE — growing the payload must not grow the cost. So each
+// test grows the input 128x and asserts the allocation count does not
+// move, logging the measured constant rather than hardcoding it.
 //
-// The property that actually matters for a defensive decoder is SIZE
-// INDEPENDENCE: growing the payload must not grow the cost. An attacker who
-// turns 512 bytes into 5 allocations and 65536 bytes into 500 has found an
-// amplification vector inside the amplification guard. So each test below grows
-// the input 128x and asserts the count does not move. The measured constant is
-// logged rather than hardcoded, so a future change that alters it is visible in
-// test output without failing on a legitimate refactor.
-//
-// The adversarial shape to watch is the exponent: `1e999999999` is a dozen bytes
-// that a naive parser turns into an enormous computation. classify_test.go
-// already pins that the WORK is bounded; this file pins the ALLOCATION.
-//
-// HOW THE MEASUREMENT IS TAKEN, AND WHY IT IS A MINIMUM
-// testing.AllocsPerRun returns a MEAN, and on Go 1.27 the mean is not stable for
-// any path that calls encoding/json: v1 is backed by encoding/json/v2, whose
-// coder state is pooled, and under -race the pool's hit/miss pattern varies
-// between processes. Measured on go1.27.0: json.Unmarshal into a string is a
-// flat 1 allocation over 12 trials without -race, and jitters to 2 in roughly 1
-// trial in 12 with it. A pool MISS can only add, never remove, so the minimum
-// over a few trials is the steady-state cost - which is the cost these tests are
-// about. Measured stable: 0 mismatches over 40 trials of min-over-3 under -race,
-// against a reproducible failure for the single measurement.
-//
-// This keeps the assertion EXACT (lo == hi) rather than granting it a tolerance,
-// which is the weaker fix a flake invites.
+// testing.AllocsPerRun returns a mean, and on Go 1.27 that mean is not
+// stable for any path through encoding/json: v1 is backed by
+// encoding/json/v2, whose pooled coder state varies its hit/miss pattern
+// between processes under -race. A pool miss can only add allocations,
+// never remove them, so the minimum over a few trials is the steady-state
+// cost these tests assert on (exactly, not with a tolerance).
 
-// minAllocsPerRun is testing.AllocsPerRun's steady-state cost: the minimum over
-// trials measurements, which discards pooled-state misses (see the note above).
+// minAllocsPerRun is testing.AllocsPerRun's steady-state cost: the minimum
+// over several trials, discarding pooled-state misses (see the file comment).
 func minAllocsPerRun(runs, trials int, f func()) float64 {
 	best := testing.AllocsPerRun(runs, f)
 	for range trials - 1 {
@@ -68,17 +49,13 @@ func TestClassifyCostIsSizeIndependent(t *testing.T) {
 		{"float", func(n int) []byte { return []byte(strings.Repeat("9", n) + ".5") }},
 		{"garbage", func(n int) []byte { return []byte("{[" + strings.Repeat("x", n)) }},
 	}
-	// Both sizes sit well past any short-input fast path, so a difference here is
-	// growth with input rather than a change of code path.
+	// Both sizes sit well past any short-input fast path, so a difference here
+	// is growth with input rather than a change of code path.
 	//
-	// The fixture is built OUTSIDE the measured closure. Building it inside
-	// measures the test's own string construction alongside the subject, and
-	// that confounder is not benign: under -race the larger fixture costs one
-	// allocation more than the smaller, so the sum moves for a reason that has
-	// nothing to do with Classify. It went unnoticed while both sides happened
-	// to land on the same total and surfaced on Go 1.27, where v1's
-	// Unmarshal-into-string dropped from 2 allocations to 1 and only the small
-	// side got cheaper.
+	// The fixture is built OUTSIDE the measured closure: building it inside
+	// would measure the test's own string construction alongside the
+	// subject, which under -race costs one allocation more for the larger
+	// fixture for a reason unrelated to Classify.
 	const small, large = 512, 65536
 	for _, s := range shapes {
 		t.Run(s.name, func(t *testing.T) {
