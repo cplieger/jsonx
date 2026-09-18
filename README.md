@@ -1,8 +1,6 @@
 # jsonx
 
-[![Go Reference](https://pkg.go.dev/badge/github.com/cplieger/jsonx/v2.svg)](https://pkg.go.dev/github.com/cplieger/jsonx/v2)
-[![Go version](https://img.shields.io/github/go-mod/go-version/cplieger/jsonx)](https://github.com/cplieger/jsonx/blob/main/go.mod)
-[![Mutation](https://img.shields.io/endpoint?url=https://raw.githubusercontent.com/cplieger/jsonx/badges/mutation.json)](https://github.com/cplieger/jsonx/issues?q=label%3Agremlins-tracker)
+[![Go Reference](https://pkg.go.dev/badge/github.com/cplieger/jsonx/v2.svg)](https://pkg.go.dev/github.com/cplieger/jsonx/v2) [![Go version](https://img.shields.io/github/go-mod/go-version/cplieger/jsonx)](https://github.com/cplieger/jsonx/blob/main/go.mod) [![Mutation](https://img.shields.io/endpoint?url=https://raw.githubusercontent.com/cplieger/jsonx/badges/mutation.json)](https://github.com/cplieger/jsonx/issues?q=label%3Agremlins-tracker)
 
 > Defensive decoding of untrusted upstream JSON: number-or-string integer fields under an explicit, pluggable tolerance policy
 
