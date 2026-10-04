@@ -2,15 +2,21 @@
 
 [![Go Reference](https://pkg.go.dev/badge/github.com/cplieger/jsonx/v2.svg)](https://pkg.go.dev/github.com/cplieger/jsonx/v2) [![Go version](https://img.shields.io/github/go-mod/go-version/cplieger/jsonx)](https://github.com/cplieger/jsonx/blob/main/go.mod) [![Mutation](https://img.shields.io/endpoint?url=https://raw.githubusercontent.com/cplieger/jsonx/badges/mutation.json)](https://github.com/cplieger/jsonx/issues?q=label%3Agremlins-tracker)
 
-> Defensive decoding of untrusted upstream JSON: number-or-string integer fields under an explicit, pluggable tolerance policy
+jsonx decodes the integer fields of someone else's JSON in Go, whether a value arrives as `14`, `"14"`, `null`, `"unknown"` or `9.0`, under one policy you choose.
 
-A standalone Go library for the JSON shape variance every scraper-adjacent app eventually meets: the same numeric field arrives as `14` on one endpoint and `"14"` on another, and odd rows carry `null`, `""`, `"unknown"`, floats, negatives, or absurdly large values. jsonx decodes all of them under one hardened core:
+It replaces the custom `UnmarshalJSON` method you would otherwise write for each inconsistent field. The policy decides, shape by shape, whether to keep the value, return 0 or return a typed error. It uses only the standard library at run time, needs Go 1.27 or later and is licensed under Apache-2.0.
 
-- **One syntactic core.** `Classify` extracts a value's facts (shape, was-string, float form, fractional, negative, overflow, padding) without judging them. It is total: any bytes yield a classification, never a panic.
-- **Pluggable policy.** A `Policy` decides per fact: accept the parsed value, tolerate the oddity as zero, or reject it with a typed `*ParseError`. Three ready-made policies cover the common stances; custom variants are plain struct copies with a field changed.
-- **Integrity guards in every policy.** Fractional values are never truncated (9.9 truncated to 9 would silently point at a different entity), large integers never round-trip through float64, and the accepted range is an explicit part of every policy.
+## Why use it
 
-Standard library only (test dependency: pgregory.net/rapid).
+jsonx is built for Go code that reads integer ids and counts from an API it does not control.
+
+- Three ready-made policies cover the common stances, each as a field type for your struct.
+- For a custom policy, copy a shipped one and set a field, such as `MinValue` to 1 for positive ids.
+- It never truncates `9.9` to `9` or rounds a large id through `float64`. `Classify` reads `9007199254740993.0` as exactly 9007199254740993.
+- A rejection is a `*ParseError` naming the rule that fired, with the offending value cut to 40 bytes.
+- Any input gives a value or an error, never a panic, and allocations do not grow with the input.
+
+Consider `json.Number` from `encoding/json` if a field only ever holds a valid number, bare or quoted. It needs no dependency. Consider [go-viper/mapstructure](https://pkg.go.dev/github.com/go-viper/mapstructure/v2) if you want weak typing on every field of generic map data at once, through its `WeaklyTypedInput` option.
 
 ## Install
 
@@ -20,43 +26,45 @@ go get github.com/cplieger/jsonx/v2@latest
 
 ## Usage
 
-### Ready-made field types
+### Field types
 
 ```go
-type fribbRecord struct {
-    AniListID jsonx.TolerantInt `json:"anilist_id"` // odd shapes become 0
+type record struct {
+    AniListID jsonx.TolerantInt `json:"anilist_id"` // odd values become 0, a malformed string is an error
     TvdbID    jsonx.TolerantInt `json:"tvdb_id"`
 }
 
-type hdbItem struct {
-    ID jsonx.StrictInt `json:"id"` // odd shapes are errors
+type item struct {
+    ID jsonx.StrictInt `json:"id"` // an error unless an integer, null or ""
 }
 ```
 
-### Functional core
+### One value
 
 ```go
-v, err := jsonx.ParseInt64(data, jsonx.Strict())       // strict: error on anything odd
-t, _ := jsonx.ParseInt64(data, jsonx.TolerantZero())   // tolerant: odd values become 0
+v, err := jsonx.ParseInt64(data, jsonx.Strict())        // an error unless an integer, null or ""
+t, terr := jsonx.ParseInt64(data, jsonx.TolerantZero()) // odd values become 0, a malformed string is an error
 ```
 
-### Composing a policy
+### A custom policy
 
-Policies are plain values; copy a shipped one and adjust:
+A policy is a plain struct value. Copy a shipped one and change the fields you need:
 
 ```go
-// A strict id decoder: null is an error, ids must be positive.
+// Strict ids: null and "" are errors, and an id must be positive.
 p := jsonx.Strict()
 p.Null = jsonx.Reject
 p.EmptyString = jsonx.Reject
 p.MinValue = 1
 
-// A tolerant decoder with a wider bound than TolerantZero's MaxInt32.
+// Tolerant, with a wider range than TolerantZero's MaxInt32.
 t := jsonx.TolerantZero()
 t.MaxValue = math.MaxInt64
 ```
 
-### Inspecting facts directly
+### The facts behind a decision
+
+`Classify` reports what a value looks like without judging it, for logic no policy expresses, such as which wire form a value arrived in or whether it was `null`:
 
 ```go
 f := jsonx.Classify(data)
@@ -64,24 +72,26 @@ f := jsonx.Classify(data)
 // f.Negative, f.Overflow, f.Padded
 ```
 
+The runnable examples on pkg.go.dev show each case, and `go test` keeps them true.
+
 ## API
 
-One line per concern; symbol depth lives in the [Go Reference](https://pkg.go.dev/github.com/cplieger/jsonx/v2).
+- Parsing: `ParseInt64(data, policy)` returns an `int64` or an error. `Classify(data)` returns the `Facts` of one value.
+- Policies: `Policy`, `Disposition` with `Reject`, `Zero` and `Accept`, and the ready-made `TolerantZero()`, `Strict()` and `StrictAbsentZero()`.
+- Field types: `TolerantInt`, `StrictInt` and `StrictAbsentZeroInt`, each a `json.Unmarshaler` for one ready-made policy.
+- Errors: `*ParseError`, with one `Reason` constant per rule.
 
-- **Policies:** `Policy`, `Disposition` (`Reject`/`Zero`/`Accept`), and the ready-made policies `TolerantZero()`, `Strict()`, `StrictAbsentZero()`. A policy is a plain struct value deciding each fact's outcome; the zero value rejects everything except the literal 0.
-- **Parsing:** `Classify(data) Facts` (total syntactic fact extraction, never panics), `ParseInt64(data, policy)`, the field types `TolerantInt` / `StrictInt` / `StrictAbsentZeroInt` (`json.Unmarshaler`, one per ready-made policy), and the typed rejection `*ParseError` carrying a `Reason` constant per gate.
-
-Bounding what an untrusted decode COSTS is a separate library: [`jsoncap`](https://github.com/cplieger/jsoncap) walks the token stream and enforces cardinality caps before allocation. It used to live here as `jsonx/bounded`.
+Every result is an `int64`. For an `int32` or a non-negative id, set the policy's `MinValue` and `MaxValue`, then convert. The full reference is on [pkg.go.dev](https://pkg.go.dev/github.com/cplieger/jsonx/v2).
 
 ## The three policies
 
-| Policy | Semantics |
-| --- | --- |
-| `TolerantZero()` | Every odd shape or invalid value decodes to 0: an upstream placeholder must neither fail the record nor masquerade as a valid id. Integral float forms accepted (`"9.0"` → 9, `"1e3"` → 1000), fractional zeroed (never truncated), range pinned to [0, MaxInt32]. Only a malformed JSON string errors. |
-| `Strict()` | Bare or quoted decimal integer anywhere in int64; `null` and `""` tolerated as 0; everything else is an error: float forms, padded strings, non-numeric strings, other shapes, overflow, empty input. |
-| `StrictAbsentZero()` | `Strict()`, plus zero-length input tolerated as 0 (an absent field decodes as zero instead of erroring). Identical in every other field. |
+`TolerantZero()` keeps a record from failing on one bad field. Every odd shape or out-of-range value becomes 0. The one error is a string that is not valid JSON, such as `"unterminated`. It accepts integral float forms and padded strings. It limits values to 0 through `math.MaxInt32`, so `-3` also becomes 0.
 
-Behavior matrix (`v, err` per input):
+`Strict()` accepts an integer written as a number or as a quoted string, anywhere in the `int64` range. It reads `null` and `""` as 0, and every other value is an error.
+
+`StrictAbsentZero()` behaves like `Strict()` and also reads zero-length input as 0. Use it when your code calls `ParseInt64` with empty bytes for a field the JSON left out.
+
+What each policy returns:
 
 | Input | `TolerantZero` | `Strict` | `StrictAbsentZero` |
 | --- | --- | --- | --- |
@@ -99,39 +109,29 @@ Behavior matrix (`v, err` per input):
 | `{}`, `[1]`, `true`, garbage | 0 | error | error |
 | `"unterminated` | error | error | error |
 
-Other stances compose the same way: a fully lenient decoder (any error → 0) is the all-`Zero` policy over the full int64 range.
+[How jsonx decodes a value](docs/how-it-works.md) gives the order the rules run in, the error type and the number grammar.
 
-## Facts and gate order
+## Unsupported by design
 
-`Classify` produces `Facts`; `ParseInt64` applies the policy's gates in a fixed order:
-
-1. Non-numeric shapes dispatch on `Shape`: `Empty`, `Null`, `EmptyString`, `MalformedString`, `NonNumericString`, `Other` → the matching `Disposition` (`Zero` or `Reject`).
-2. Numeric values then pass `PaddedString` → `FloatForm` → `Fractional` → range (`MinValue`/`MaxValue`, including int64 overflow → `OutOfRange`).
-
-`Disposition` is fail-closed: its zero value is `Reject`, and `Accept` is meaningful only where a usable integer exists (`PaddedString`, `FloatForm`); on any other gate it is treated as `Reject`, never as silent acceptance. There is deliberately no truncation path: `Fractional` can only zero or reject. A zero-value `Policy` rejects everything except the literal 0.
-
-Rejections are typed: match `*jsonx.ParseError` with `errors.AsType`. It carries the `Reason` (which gate fired), the full `Facts`, and a bounded snippet of the offending bytes.
-
-## Accepted number grammar
-
-jsonx accepts only decimal number forms, a deliberately tighter grammar than raw `strconv` parsing:
-
-- Quoted hex floats (`"0x1p2"`), `"Inf"`/`"NaN"` words, and digit-separator underscores (`"1_000"`) classify as non-numeric strings, even though `strconv.ParseFloat` would accept them.
-- Only ASCII JSON whitespace counts as padding; a Unicode-space-padded token stays garbage.
-- Integer literals parse via `strconv.ParseInt` across the whole int64 range, never through float64, whose rounding corrupts ids above 2^53.
-- Float-form literals (`"9.0"`, `1e3`) never pass through float64 either: integrality, range, and the exact value are decided from the decimal digits. `9007199254740993.0` (2^53+1, the first integer binary64 cannot represent) decodes exactly instead of rounding to 2^53. A full underflow (`1e-999`) classifies as fractional, not as an integral zero. The int64 boundary is exact: `"9223372036854775807.0"` is MaxInt64; one more overflows. Adversarially long exponents saturate, so classification work stays bounded by input length.
-
-Quoted-number reality is still honored: leading zeros (`"007"`) and a leading `+` (`"+5"`) parse in string form, while bare tokens must be exact JSON number grammar.
-
-## Unsupported by Design
-
-| Feature | Rationale |
+| Feature | Reason |
 | --- | --- |
-| Truncating fractional values | Silent data corruption: 9.9 truncated to 9 points at a different entity. `Fractional` has no `Accept`. |
-| Float-valued fields | This library targets integer ids/counts. Decode real floats with `float64` or `json.Number`. |
-| Wire-form round-tripping | Field types marshal as plain numbers via their underlying int64; the original number-vs-string form is not preserved. |
-| Tolerant string/array/object decoding | This library targets the number-or-string integer case; tolerant decoding of other shapes stays application code. |
-| `json.Number` replacement | Different concept: `json.Number` defers parsing to every reader; jsonx parses once under an explicit policy. |
+| Truncating fractional values | 9.9 truncated to 9 points at a different record. `Fractional` has no `Accept`. |
+| Float-valued fields | jsonx decodes integer ids and counts. Decode real floats into `float64` or `json.Number`. |
+| Keeping the wire form | The field types marshal as plain numbers, so a value read from `"14"` is written as `14`. |
+| Tolerant strings, arrays and objects | jsonx covers the integer that arrives as a number or a string. Tolerant decoding of other shapes stays in your code. |
+| Replacing `json.Number` | `json.Number` leaves parsing to each reader. jsonx parses once, under a policy. |
+
+## Related projects
+
+[jsoncap](https://github.com/cplieger/jsoncap) caps how many elements an untrusted JSON body may decode before it allocates them. It pairs with jsonx, which decides what each integer value becomes.
+
+## Documentation
+
+- [How jsonx decodes a value](docs/how-it-works.md) covers the facts, the order the rules run in, the error type, the field types and the number grammar, for a developer writing a custom policy.
+
+## Contributing
+
+Issues and pull requests are welcome. See the [contributing guide](https://github.com/cplieger/.github/blob/main/CONTRIBUTING.md).
 
 ## Disclaimer
 
