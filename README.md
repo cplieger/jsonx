@@ -131,7 +131,7 @@ What each policy returns:
 
 ## Contributing
 
-Issues and pull requests are welcome. See the [contributing guide](https://github.com/cplieger/.github/blob/main/CONTRIBUTING.md).
+See [CONTRIBUTING.md](CONTRIBUTING.md).
 
 ## Disclaimer
 
