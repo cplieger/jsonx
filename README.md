@@ -1,5 +1,8 @@
 # jsonx
 
+> Moved to [`github.com/cplieger/go/jsonx`](https://github.com/cplieger/go/tree/dev/jsonx).
+> **Archived 2026-11-06. This repository is read-only. The published Go module stays available.**
+
 [![Go Reference](https://pkg.go.dev/badge/github.com/cplieger/jsonx/v2.svg)](https://pkg.go.dev/github.com/cplieger/jsonx/v2) [![Go version](https://img.shields.io/github/go-mod/go-version/cplieger/jsonx)](https://github.com/cplieger/jsonx/blob/main/go.mod) [![Mutation](https://img.shields.io/endpoint?url=https://raw.githubusercontent.com/cplieger/jsonx/badges/mutation.json)](https://github.com/cplieger/jsonx/issues?q=label%3Agremlins-tracker)
 
 jsonx decodes the integer fields of someone else's JSON in Go, whether a value arrives as `14`, `"14"`, `null`, `"unknown"` or `9.0`, under one policy you choose.
